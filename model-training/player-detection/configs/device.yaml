@@ -1,0 +1,27 @@
+# Device Configuration
+
+# Device selection priority
+device_priority:
+  - "cuda"     # NVIDIA CUDA (preferred)
+  - "dml"      # DirectML (Windows GPU fallback) 
+  - "cpu"      # CPU (final fallback)
+
+# CUDA settings
+cuda:
+  test_kernel: true      # Test CUDA with a small kernel before use
+  fallback_on_error: true # Fallback to next device if CUDA fails
+
+# DirectML settings (Windows)
+directml:
+  test_ops: true         # Test DirectML operations before use
+  fallback_on_error: true # Fallback to CPU if DirectML fails
+
+# CPU settings
+cpu:
+  threads: null          # Number of CPU threads (null for auto)
+
+# Mixed precision training
+amp:
+  cuda: true             # Enable AMP for CUDA
+  directml: false        # Disable AMP for DirectML (compatibility)
+  cpu: false             # Disable AMP for CPU
