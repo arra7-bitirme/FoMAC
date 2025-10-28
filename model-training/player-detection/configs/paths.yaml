@@ -1,0 +1,18 @@
+# Path Configuration
+# All paths can be absolute or relative to workspace root
+
+workspace_root: "~/Desktop/bitirme/yolo"
+soccernet_root: "soccerNet"
+output_root: "datasets/yolo_detection_extracted"
+models_root: "models"
+reports_root: "reports"  # Root directory for all training reports
+
+# Dataset structure
+dataset_yaml: "dataset.yaml"
+train_split: "train"
+val_split: "val"
+test_split: "test"
+
+# Video and annotation file patterns
+video_pattern: "{half}_720p.mkv"
+annotation_pattern: "{half}_player_boundingbox_maskrcnn.json"

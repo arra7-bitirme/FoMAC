@@ -1,0 +1,5 @@
+datasets/
+soccerNet/
+modules/__pycache__/
+reports/__pycache__/
+utils/__pycache__/
