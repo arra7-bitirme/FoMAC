@@ -1,0 +1,32 @@
+# Dataset Extraction Configuration
+
+# Extraction control - Set to false to use existing prepared ballDataset
+run_extraction: false  # Whether to run dataset extraction (use existing ballDataset)
+
+# Sampling settings
+max_samples_per_half: null  # Maximum samples per half (null for all)
+min_box_size: 10           # Minimum bounding box size in pixels
+
+# Temporal alignment settings
+det_fps: null           # Detection FPS (null for auto-calculation)
+det_start_sec: 0.5      # Detection start time offset in seconds
+frame_shift: 0          # Frame shift for fine-tuning alignment
+
+# Class configuration - Updated to match ballDataset classes
+class_names:
+  - "Player"         # Class 0: Player detection
+  - "Ball"           # Class 1: Ball detection
+  - "Referee"        # Class 2: Referee detection
+
+# Season splits for train/val/test
+season_splits:
+  train: ["2014-2015"]
+  val: ["2015-2016"] 
+  test: ["2016-2017"]
+
+# Video quality settings
+jpeg_quality: 95        # JPEG compression quality for extracted frames
+
+# Bbox scaling and validation
+scale_mode: "scale"     # 'scale' or 'letterbox' for bbox scaling
+validate_boxes: true    # Validate and clamp bounding boxes
