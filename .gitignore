@@ -416,3 +416,30 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Dataset files (large binary files)
+model-training/ball-detection/ballDataset/*
+model-training/ball-detection/soccerNet/
+model-training/player-detection/datasets/
+
+# Python cache and temporary files
+**/__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Jupyter Notebook checkpoints
+.ipynb_check
+
+# Temporary and cache files
+*.cache
+*.tmp
+temp/
+tmp/
+.DS_Store
+
+# Training outputs and predictions
+predictions_output/
+**/predictions_output/
+comparison_analysis_*/
