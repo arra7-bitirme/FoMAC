@@ -106,12 +106,18 @@ class ConfigManager:
         paths_group = parser.add_argument_group('Paths')
         paths_group.add_argument('--workspace-root', help='Workspace root directory')
         paths_group.add_argument('--soccernet-root', help='SoccerNet dataset root')
+        paths_group.add_argument('--snmot-root', help='SNMOT dataset root directory')
         paths_group.add_argument('--output-root', help='Output dataset root')
         paths_group.add_argument('--models-root', help='Models output directory')
         paths_group.add_argument('--reports-root', help='Reports output directory')
         
         # Extraction options
         extraction_group = parser.add_argument_group('Dataset Extraction')
+        extraction_group.add_argument(
+            '--dataset-type',
+            choices=['soccernet', 'snmot'],
+            help='Dataset format to extract'
+        )
         extraction_group.add_argument(
             '--run-extraction',
             action='store_true',
@@ -213,6 +219,8 @@ class ConfigManager:
             merged['paths']['workspace_root'] = args.workspace_root
         if args.soccernet_root:
             merged['paths']['soccernet_root'] = args.soccernet_root
+        if args.snmot_root:
+            merged['paths']['snmot_root'] = args.snmot_root
         if args.output_root:
             merged['paths']['output_root'] = args.output_root
         if args.models_root:
@@ -221,6 +229,8 @@ class ConfigManager:
             merged['paths']['reports_root'] = args.reports_root
         
         # Extraction overrides
+        if args.dataset_type:
+            merged['extraction']['dataset_type'] = args.dataset_type
         if args.run_extraction:
             merged['extraction']['run_extraction'] = True
         elif args.no_extraction:
@@ -312,7 +322,18 @@ def validate_configurations(configs: Dict[str, Dict[str, Any]]) -> List[str]:
     # Validate paths
     if 'paths' in configs:
         paths = configs['paths']
-        required_paths = ['workspace_root', 'soccernet_root', 'output_root', 'models_root']
+        dataset_type = configs.get('extraction', {}).get('dataset_type', 'soccernet')
+        dataset_type = (dataset_type or 'soccernet').lower()
+
+        if dataset_type not in {'soccernet', 'snmot'}:
+            errors.append(f"Unsupported dataset_type: {dataset_type}")
+
+        required_paths = ['workspace_root', 'output_root', 'models_root']
+        if dataset_type == 'snmot':
+            required_paths.append('snmot_root')
+        else:
+            required_paths.append('soccernet_root')
+
         for path_key in required_paths:
             if not paths.get(path_key):
                 errors.append(f"Missing required path: {path_key}")

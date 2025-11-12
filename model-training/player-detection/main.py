@@ -121,8 +121,17 @@ class YOLOTrainingPipeline:
         
         # Paths
         paths = self.configs.get('paths', {})
+        extraction_cfg = self.configs.get('extraction', {})
+        dataset_type = (extraction_cfg.get('dataset_type') or 'soccernet').lower()
+
         logger.info(f"Workspace Root: {paths.get('workspace_root')}")
-        logger.info(f"SoccerNet Root: {paths.get('soccernet_root')}")
+        if dataset_type == 'snmot':
+            logger.info(f"Dataset Type: SNMOT")
+            logger.info(f"SNMOT Root: {paths.get('snmot_root')}")
+        else:
+            logger.info(f"Dataset Type: SoccerNet")
+            logger.info(f"SoccerNet Root: {paths.get('soccernet_root')}")
+
         logger.info(f"Output Root: {paths.get('output_root')}")
         logger.info(f"Models Root: {paths.get('models_root')}")
         

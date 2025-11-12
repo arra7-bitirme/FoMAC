@@ -1,6 +1,6 @@
 # YOLO Football Player Detection Training Pipeline
 
-A modular, configuration-driven training pipeline for YOLO-based football player detection using the SoccerNet dataset.
+A modular, configuration-driven training pipeline for YOLO-based football entity detection. The default configuration now targets the SNMOT multi-class tracking dataset (players, referees, ball, goalkeepers) while keeping backward compatibility with the original SoccerNet workflow.
 
 ## 🏗️ Architecture
 
@@ -29,7 +29,7 @@ yolo/
 ### 🧩 Modules
 
 1. **Device Manager**: Handles CUDA/DirectML/CPU device selection with automatic fallback
-2. **Dataset Extractor**: Extracts frames and labels from SoccerNet with alignment preservation
+2. **Dataset Extractor**: Converts SNMOT sequences (and legacy SoccerNet matches) into YOLO-ready images and labels
 3. **Trainer**: YOLO model training with configuration-driven parameters
 4. **Config Manager**: Loads YAML configs and merges with CLI arguments
 5. **Visualization Utils**: Helper functions for bbox scaling and frame processing
@@ -81,10 +81,11 @@ python main.py --predict /path/to/images_or_video
 ### Path Configuration (`configs/paths.yaml`)
 
 ```yaml
-workspace_root: "~/bitirme"
-soccernet_root: "soccerNet"
-output_root: "datasets/yolo_detection_extracted"
+workspace_root: "."
+snmot_root: "tracking"
+output_root: "datasets/snmot_detection"
 models_root: "models"
+reports_root: "reports"
 ```
 
 ### YOLO Parameters (`configs/yolo_params.yaml`)
@@ -101,12 +102,14 @@ lr0: 0.002
 ### Extraction Settings (`configs/extraction.yaml`)
 
 ```yaml
+dataset_type: "snmot"
 run_extraction: true
-max_samples_per_half: null  # null for all samples
-det_start_sec: 0.5
-frame_shift: 0
-class_names:
-  - "player"  # Currently only player class available
+clean_output: true
+snmot:
+  copy_images: true
+  include_empty_frames: false
+  min_confidence: 0.0
+class_names: []  # Auto-detect classes from SNMOT metadata
 ```
 
 ### Device Configuration (`configs/device.yaml`)

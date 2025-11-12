@@ -1,24 +1,30 @@
 """
 Dataset Extraction Module
 
-Handles extraction of frames and labels from SoccerNet dataset
-with frame-label alignment preservation.
+Handles extraction of frames and labels for supported datasets and outputs
+data ready for YOLO training.
 """
 
-import yaml
+import csv
+import logging
+import os
+import sys
+import shutil
+import configparser
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
+
 import cv2
 import numpy as np
+import yaml
 from tqdm import tqdm
-import logging
-import sys
 
 logger = logging.getLogger(__name__)
 
 
 class DatasetExtractor:
-    """Extracts frames and YOLO-format labels from SoccerNet dataset."""
+    """Extracts frames and YOLO-format labels for supported datasets."""
     
     def __init__(self, config: Dict[str, Any], paths_config: Dict[str, Any]):
         """
@@ -30,10 +36,19 @@ class DatasetExtractor:
         """
         self.config = config
         self.paths_config = paths_config
+        self.dataset_type = (config.get('dataset_type') or 'soccernet').lower()
+
+        # Track discovered class names in a deterministic order
+        self._class_names: List[str] = []
+        self._class_name_to_id: Dict[str, int] = {}
+
+        initial_class_names = config.get('class_names') or []
+        for class_name in initial_class_names:
+            self._register_class_name(class_name)
         
     def extract_dataset(self) -> Path:
         """
-        Extract complete dataset from SoccerNet.
+        Extract the configured dataset into YOLO-ready format.
         
         Returns:
             Path to the output dataset root
@@ -41,21 +56,30 @@ class DatasetExtractor:
         if not self.config.get('run_extraction', True):
             logger.info("Dataset extraction skipped (run_extraction=False)")
             return self._get_output_root()
-            
+
         logger.info("=" * 80)
-        logger.info("DATASET EXTRACTION (alignment-preserving)")
+        logger.info("DATASET EXTRACTION")
         logger.info("=" * 80)
-        
+        logger.info(f"Dataset type: {self.dataset_type.upper()}")
+
+        if self.dataset_type == 'snmot':
+            output_root = self._extract_snmot_dataset()
+        else:
+            output_root = self._extract_soccernet_dataset()
+
+        self._create_dataset_yaml(output_root)
+        logger.info("✅ Dataset extraction completed")
+        return output_root
+
+    def _extract_soccernet_dataset(self) -> Path:
+        """Extract dataset from SoccerNet format."""
         soccernet_root = self._get_soccernet_root()
         output_root = self._get_output_root()
-        
+
         logger.info(f"Source: {soccernet_root}")
         logger.info(f"Output: {output_root}")
-        
-        self._batch_extract_dataset(soccernet_root, output_root)
-        self._create_dataset_yaml(output_root)
-        
-        logger.info("✅ Dataset extraction completed")
+
+        self._batch_extract_soccernet_dataset(soccernet_root, output_root)
         return output_root
     
     def _get_soccernet_root(self) -> Path:
@@ -68,7 +92,7 @@ class DatasetExtractor:
         workspace_root = Path(self.paths_config['workspace_root']).expanduser()
         return workspace_root / self.paths_config['output_root']
     
-    def _batch_extract_dataset(self, soccernet_root: Path, output_root: Path):
+    def _batch_extract_soccernet_dataset(self, soccernet_root: Path, output_root: Path):
         """Extract dataset from all matches."""
         matches = self._find_matches(soccernet_root)
         splits = self._split_by_season(matches)
@@ -190,6 +214,8 @@ class DatasetExtractor:
         lbl_dir = out_root / "labels"
         img_dir.mkdir(parents=True, exist_ok=True)
         lbl_dir.mkdir(parents=True, exist_ok=True)
+
+        player_class_id = self._register_class_name('player')
         
         preds, size = load_soccernet_json(json_path)
         
@@ -289,9 +315,8 @@ class DatasetExtractor:
                     nw = max(0.0, min(1.0, nw))
                     nh = max(0.0, min(1.0, nh))
                     
-                    # For now, all detections are "player" class (index 0)
-                    # TODO: Add class detection logic when multi-class data becomes available
-                    cls_id = 0  # player class
+                    # For SoccerNet extractions we only export the player class.
+                    cls_id = player_class_id
                     f.write(f"{cls_id} {x_center:.6f} {y_center:.6f} {nw:.6f} {nh:.6f}\n")
                     valid += 1
             
@@ -307,10 +332,415 @@ class DatasetExtractor:
         
         cap.release()
         return exported
+
+    def _extract_snmot_dataset(self) -> Path:
+        """Extract dataset from the SNMOT tracking format."""
+        dataset_root = self._get_snmot_root()
+        output_root = self._get_output_root()
+
+        if not dataset_root.exists():
+            raise FileNotFoundError(f"SNMOT dataset root not found: {dataset_root}")
+
+        logger.info(f"Source: {dataset_root}")
+        logger.info(f"Output: {output_root}")
+
+        if output_root.exists() and self.config.get('clean_output', True):
+            logger.info("Removing previous extracted dataset (clean_output=True)")
+            shutil.rmtree(output_root)
+
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        splits = self._resolve_snmot_splits(dataset_root)
+        logger.info(f"Processing splits: {', '.join(splits)}")
+
+        summary: Dict[str, Dict[str, int]] = {}
+        for split_name in splits:
+            source_dir = dataset_root / split_name
+            if not source_dir.exists():
+                logger.warning(f"Split directory missing, skipping: {source_dir}")
+                continue
+
+            stats = self._process_snmot_split(split_name, source_dir, output_root / split_name)
+            summary[split_name] = stats
+
+        if summary:
+            logger.info("SNMOT extraction summary:")
+            for split_name, stats in summary.items():
+                logger.info(
+                    "  %s: %d sequences, %d frames, %d labels",
+                    split_name,
+                    stats['sequences'],
+                    stats['frames'],
+                    stats['labels']
+                )
+
+        return output_root
+
+    def _get_snmot_root(self) -> Path:
+        """Resolve the SNMOT dataset root path."""
+        workspace_root = Path(self.paths_config['workspace_root']).expanduser()
+        dataset_subdir = self.paths_config.get('snmot_root')
+        if not dataset_subdir:
+            raise KeyError("snmot_root not defined in paths configuration")
+        return (workspace_root / dataset_subdir).resolve()
+
+    def _resolve_snmot_splits(self, dataset_root: Path) -> List[str]:
+        """Determine which SNMOT splits to process."""
+        snmot_cfg = self.config.get('snmot', {})
+        configured = snmot_cfg.get('splits')
+        if configured:
+            candidates = [str(split) for split in configured]
+        else:
+            candidates: List[str] = []
+            for key in ('train_split', 'val_split', 'test_split'):
+                name = self.paths_config.get(key)
+                if name and name not in candidates:
+                    candidates.append(name)
+            if not candidates:
+                candidates = ['train', 'test']
+        # Preserve order while removing duplicates
+        seen = set()
+        ordered = []
+        for name in candidates:
+            if name not in seen:
+                seen.add(name)
+                ordered.append(name)
+        existing = [name for name in ordered if (dataset_root / name).exists()]
+        if existing:
+            return existing
+        # Fallback: use all available subdirectories
+        return [p.name for p in sorted(dataset_root.iterdir()) if p.is_dir()]
+
+    def _process_snmot_split(self, split_name: str, source_dir: Path, target_dir: Path) -> Dict[str, int]:
+        """Convert a single SNMOT split into YOLO format."""
+        images_out = target_dir / "images"
+        labels_out = target_dir / "labels"
+        images_out.mkdir(parents=True, exist_ok=True)
+        labels_out.mkdir(parents=True, exist_ok=True)
+
+        snmot_cfg = self.config.get('snmot', {})
+        copy_images = snmot_cfg.get('copy_images', True)
+        include_empty = snmot_cfg.get('include_empty_frames', False)
+
+        sequence_dirs = [seq for seq in sorted(source_dir.iterdir()) if seq.is_dir()]
+        stats = {'sequences': 0, 'frames': 0, 'labels': 0}
+
+        if not sequence_dirs:
+            logger.warning(f"No sequences found for split {split_name} in {source_dir}")
+            return stats
+
+        for sequence_dir in tqdm(sequence_dirs, desc=f"Extracting {split_name.upper()}"):
+            try:
+                seq_stats = self._process_snmot_sequence(
+                    sequence_dir,
+                    images_out,
+                    labels_out,
+                    copy_images=copy_images,
+                    include_empty=include_empty
+                )
+            except Exception as exc:  # pragma: no cover - safety net for unexpected formats
+                logger.error(f"Failed to process sequence {sequence_dir.name}: {exc}")
+                continue
+
+            stats['sequences'] += 1
+            stats['frames'] += seq_stats['frames']
+            stats['labels'] += seq_stats['labels']
+
+        return stats
+
+    def _process_snmot_sequence(
+        self,
+        sequence_dir: Path,
+        images_out: Path,
+        labels_out: Path,
+        *,
+        copy_images: bool,
+        include_empty: bool
+    ) -> Dict[str, int]:
+        """Process a single SNMOT sequence directory."""
+        meta = self._load_snmot_sequence_metadata(sequence_dir)
+        annotations = self._load_snmot_annotations(sequence_dir, meta)
+
+        stats = {'frames': 0, 'labels': 0}
+
+        if not annotations and not include_empty:
+            logger.debug(f"Sequence {meta['sequence_name']} has no annotations; skipping")
+            return stats
+
+        frame_ids = sorted(annotations.keys())
+        if include_empty:
+            total_frames = meta.get('total_frames') or 0
+            if total_frames > 0:
+                frame_ids = sorted(set(frame_ids).union(range(1, total_frames + 1)))
+
+        for frame_id in frame_ids:
+            labels = annotations.get(frame_id, [])
+            if not labels and not include_empty:
+                continue
+
+            src_image = meta['image_dir'] / f"{frame_id:06d}{meta['image_ext']}"
+            if not src_image.exists():
+                logger.debug(f"Missing frame {src_image}; skipping")
+                continue
+
+            image_stem = f"{meta['sequence_name']}_{frame_id:06d}"
+            dst_image = images_out / f"{image_stem}{meta['image_ext']}"
+            dst_label = labels_out / f"{image_stem}.txt"
+
+            if copy_images:
+                shutil.copy2(src_image, dst_image)
+            else:
+                try:
+                    os.link(src_image, dst_image)
+                except OSError:
+                    shutil.copy2(src_image, dst_image)
+
+            if labels:
+                self._write_yolo_label_file(dst_label, labels)
+                stats['labels'] += len(labels)
+            elif include_empty:
+                dst_label.touch()
+
+            stats['frames'] += 1
+
+        return stats
+
+    def _load_snmot_sequence_metadata(self, sequence_dir: Path) -> Dict[str, Any]:
+        """Load sequence metadata from seqinfo.ini and gameinfo.ini."""
+        seqinfo_path = sequence_dir / "seqinfo.ini"
+        if not seqinfo_path.exists():
+            raise FileNotFoundError(f"seqinfo.ini not found for sequence: {sequence_dir}")
+
+        parser = configparser.ConfigParser()
+        parser.read(seqinfo_path)
+        if 'Sequence' not in parser:
+            raise ValueError(f"seqinfo.ini missing [Sequence] section: {seqinfo_path}")
+
+        section = parser['Sequence']
+        sequence_name = section.get('name', sequence_dir.name)
+        image_dir = sequence_dir / section.get('imDir', 'img1')
+        image_ext = section.get('imExt', '.jpg')
+        width = section.getint('imWidth', fallback=1920)
+        height = section.getint('imHeight', fallback=1080)
+        total_frames = section.getint('seqLength', fallback=0)
+        frame_rate = section.getint('frameRate', fallback=25)
+
+        tracklet_classes = self._parse_gameinfo_classes(sequence_dir / 'gameinfo.ini')
+
+        if not tracklet_classes:
+            logger.warning(f"No tracklet metadata parsed for sequence {sequence_name}")
+
+        return {
+            'sequence_name': sequence_name,
+            'image_dir': image_dir,
+            'image_ext': image_ext,
+            'width': width,
+            'height': height,
+            'total_frames': total_frames,
+            'frame_rate': frame_rate,
+            'tracklet_classes': tracklet_classes,
+        }
+
+    def _parse_gameinfo_classes(self, gameinfo_path: Path) -> Dict[int, str]:
+        """Parse class mappings from gameinfo.ini."""
+        mapping: Dict[int, str] = {}
+
+        if not gameinfo_path.exists():
+            logger.warning(f"gameinfo.ini not found: {gameinfo_path}")
+            return mapping
+
+        parser = configparser.ConfigParser()
+        parser.read(gameinfo_path)
+        if 'Sequence' not in parser:
+            return mapping
+
+        for key, value in parser['Sequence'].items():
+            if not key.startswith('trackletid_'):
+                continue
+
+            try:
+                tracklet_id = int(key.split('_')[1])
+            except (IndexError, ValueError):
+                continue
+
+            parts = [part.strip() for part in value.split(';') if part.strip()]
+            base = parts[0] if parts else ''
+            qualifier = ' '.join(parts[1:]) if len(parts) > 1 else ''
+
+            class_name = self._sanitize_snmot_class_name(base, qualifier)
+            if class_name:
+                mapping[tracklet_id] = class_name
+
+        return mapping
+
+    def _sanitize_snmot_class_name(self, base: str, qualifier: str) -> str:
+        """Convert raw SNMOT class strings into YOLO-friendly names."""
+        base_tokens = self._normalize_tokens(base)
+        if not base_tokens:
+            return ''
+
+        qualifier_tokens = self._normalize_tokens(qualifier)
+        if qualifier_tokens and base_tokens[0] in {'referee'}:
+            tokens = base_tokens + qualifier_tokens
+        else:
+            tokens = base_tokens
+
+        return '_'.join(tokens)
+
+    def _normalize_tokens(self, text: str) -> List[str]:
+        """Normalize a class descriptor into sanitized tokens."""
+        if not text:
+            return []
+
+        normalized = (
+            text.lower()
+            .replace('-', ' ')
+            .replace('/', ' ')
+            .replace('\\', ' ')
+            .replace(':', ' ')
+            .replace('.', ' ')
+            .replace('_', ' ')
+        )
+
+        tokens = [token for token in normalized.split() if token]
+        replacements = {
+            'goalkeepers': 'goalkeeper',
+            'keepers': 'goalkeeper',
+            'keeper': 'goalkeeper',
+            'goalie': 'goalkeeper',
+            'referees': 'referee',
+            'ref': 'referee',
+        }
+
+        sanitized: List[str] = []
+        for token in tokens:
+            token = replacements.get(token, token)
+            if token.isdigit():
+                continue
+            if len(token) == 1 and token.isalpha():
+                continue
+            sanitized.append(token)
+
+        return sanitized
+
+    def _load_snmot_annotations(
+        self,
+        sequence_dir: Path,
+        meta: Dict[str, Any]
+    ) -> Dict[int, List[Tuple[int, float, float, float, float]]]:
+        """Load annotations for a sequence and convert to YOLO format."""
+        gt_path = sequence_dir / "gt" / "gt.txt"
+        if not gt_path.exists():
+            logger.warning(f"Ground truth file missing for sequence {sequence_dir.name}: {gt_path}")
+            return {}
+
+        min_box = self.config.get('min_box_size', 0)
+        snmot_cfg = self.config.get('snmot', {})
+        min_conf = snmot_cfg.get('min_confidence', 0.0)
+        clamp_boxes = snmot_cfg.get('clamp_boxes', True)
+
+        width = meta['width']
+        height = meta['height']
+        tracklet_classes = meta['tracklet_classes']
+
+        annotations: Dict[int, List[Tuple[int, float, float, float, float]]] = defaultdict(list)
+        missing_tracklets: Set[int] = set()
+
+        with open(gt_path, 'r', newline='') as handle:
+            reader = csv.reader(handle)
+            for row in reader:
+                if not row or len(row) < 6:
+                    continue
+
+                try:
+                    frame_id = int(float(row[0]))
+                    track_id = int(float(row[1]))
+                    x = float(row[2])
+                    y = float(row[3])
+                    w = float(row[4])
+                    h = float(row[5])
+                    conf = float(row[6]) if len(row) > 6 else 1.0
+                except ValueError:
+                    continue
+
+                if conf < min_conf:
+                    continue
+                if w <= 0 or h <= 0:
+                    continue
+
+                class_name = tracklet_classes.get(track_id)
+                if not class_name:
+                    if track_id not in missing_tracklets:
+                        missing_tracklets.add(track_id)
+                    continue
+
+                if min_box and (w < min_box or h < min_box):
+                    continue
+
+                if clamp_boxes:
+                    x1 = max(0.0, min(x, width - 1))
+                    y1 = max(0.0, min(y, height - 1))
+                    x2 = max(0.0, min(x + w, width))
+                    y2 = max(0.0, min(y + h, height))
+                    w = x2 - x1
+                    h = y2 - y1
+                    x = x1
+                    y = y1
+                    if w <= 0 or h <= 0:
+                        continue
+
+                x_center = (x + w / 2.0) / width
+                y_center = (y + h / 2.0) / height
+                w_norm = w / width
+                h_norm = h / height
+
+                x_center = min(max(x_center, 0.0), 1.0)
+                y_center = min(max(y_center, 0.0), 1.0)
+                w_norm = min(max(w_norm, 0.0), 1.0)
+                h_norm = min(max(h_norm, 0.0), 1.0)
+
+                class_id = self._register_class_name(class_name)
+                annotations[frame_id].append((class_id, x_center, y_center, w_norm, h_norm))
+
+        if missing_tracklets:
+            missing_preview = ", ".join(map(str, sorted(missing_tracklets)[:5]))
+            if len(missing_tracklets) > 5:
+                missing_preview += ", ..."
+            logger.warning(
+                "Sequence %s missing class metadata for track IDs: %s",
+                meta['sequence_name'],
+                missing_preview
+            )
+
+        return dict(annotations)
+
+    def _write_yolo_label_file(
+        self,
+        label_path: Path,
+        labels: List[Tuple[int, float, float, float, float]]
+    ):
+        """Write YOLO labels to disk."""
+        with open(label_path, 'w') as label_file:
+            for cls_id, xc, yc, w, h in labels:
+                label_file.write(f"{cls_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
+
+    def _register_class_name(self, class_name: str) -> int:
+        """Register a class name and return its numeric identifier."""
+        normalized = str(class_name).strip()
+        if not normalized:
+            raise ValueError("Class name cannot be empty")
+
+        if normalized not in self._class_name_to_id:
+            self._class_name_to_id[normalized] = len(self._class_names)
+            self._class_names.append(normalized)
+
+        return self._class_name_to_id[normalized]
     
     def _create_dataset_yaml(self, output_root: Path):
         """Create dataset.yaml configuration file."""
-        class_names = self.config.get('class_names', ['player'])
+        class_names = self.config.get('class_names') or self._class_names
+        if not class_names:
+            class_names = ['player']
         
         config = {
             'path': str(output_root.absolute()),
@@ -325,6 +755,7 @@ class DatasetExtractor:
         with open(yaml_path, 'w') as f:
             yaml.safe_dump(config, f, default_flow_style=False)
         
+        logger.info(f"Detected classes ({len(class_names)}): {class_names}")
         logger.info(f"Created dataset configuration: {yaml_path}")
     
     def ensure_dataset_yaml(self) -> Path:

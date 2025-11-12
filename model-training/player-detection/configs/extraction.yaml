@@ -1,33 +1,41 @@
 # Dataset Extraction Configuration
 
+# Dataset selection
+dataset_type: "snmot"   # Options: snmot, soccernet
+
 # Extraction control
-run_extraction: true  # Whether to run dataset extraction
+run_extraction: true    # Whether to run dataset extraction
+clean_output: true      # Remove previously extracted dataset before running
 
-# Sampling settings
-max_samples_per_half: null  # Maximum samples per half (null for all)
-min_box_size: 10           # Minimum bounding box size in pixels
+# SNMOT-specific settings
+snmot:
+  copy_images: true            # Copy frames into YOLO layout (set false to hardlink when supported)
+  include_empty_frames: false  # Skip frames without any annotations
+  min_confidence: 0.0          # Minimum annotation confidence to keep
+  clamp_boxes: true            # Clamp bounding boxes to image bounds
 
-# Temporal alignment settings
-det_fps: null           # Detection FPS (null for auto-calculation)
-det_start_sec: 0.5      # Detection start time offset in seconds
-frame_shift: 0          # Frame shift for fine-tuning alignment
+# Sampling settings (legacy options kept for compatibility)
+max_samples_per_half: null     # SoccerNet only
+min_box_size: 4                # Minimum bounding box size in pixels
+
+# Temporal alignment settings (SoccerNet only)
+det_fps: null
+det_start_sec: 0.5
+frame_shift: 0
 
 # Class configuration
-class_names:
-  - "player"           # Currently only player class available
-  # - "ball"           # Add more classes here when data becomes available
-  # - "referee"        # Future class examples
-  # - "goal"
+# Leave empty to auto-detect classes from SNMOT metadata.
+class_names: []
 
-# Season splits for train/val/test
+# Season splits for train/val/test (SoccerNet only)
 season_splits:
   train: ["2014-2015"]
-  val: ["2015-2016"] 
+  val: ["2015-2016"]
   test: ["2016-2017"]
 
-# Video quality settings
-jpeg_quality: 95        # JPEG compression quality for extracted frames
+# Video quality settings (SoccerNet only)
+jpeg_quality: 95
 
 # Bbox scaling and validation
-scale_mode: "scale"     # 'scale' or 'letterbox' for bbox scaling
-validate_boxes: true    # Validate and clamp bounding boxes
+scale_mode: "scale"
+validate_boxes: true

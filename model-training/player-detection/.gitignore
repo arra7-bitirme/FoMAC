@@ -1,5 +1,7 @@
 datasets/
 soccerNet/
+tracking/
+datasets/
 modules/__pycache__/
 reports/__pycache__/
 utils/__pycache__/
