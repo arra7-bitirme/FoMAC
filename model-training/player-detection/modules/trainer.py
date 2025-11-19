@@ -11,6 +11,12 @@ from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
 
+# Optional: live class-wise reporter
+try:
+    from utils.classwise_reporter import ClasswiseReporter
+except Exception:
+    ClasswiseReporter = None
+
 
 class YOLOTrainer:
     """Handles YOLO model training."""
@@ -58,7 +64,18 @@ class YOLOTrainer:
         # Create model
         model_arch = training_config.pop("model")
         self.model = YOLO(model_arch)
-        
+        # Optionally start classwise reporter to watch training outputs
+        reporter = None
+        try:
+            models_root = self._get_models_root()
+            project_name = self.yolo_config.get('project_name', 'football_detector')
+            project_dir = models_root / project_name
+            if ClasswiseReporter is not None:
+                reporter = ClasswiseReporter(models_root, project_name, poll_interval=5.0)
+                reporter.start()
+        except Exception as e:
+            logger.debug(f"Could not start ClasswiseReporter: {e}")
+
         # Start training
         try:
             results = self.model.train(**training_config)
@@ -77,13 +94,28 @@ class YOLOTrainer:
                 logger.warning(f"Failed to generate reports: {report_error}")
             
             if best_model_path.exists():
+                if reporter is not None:
+                    try:
+                        reporter.stop()
+                    except Exception:
+                        pass
                 return best_model_path
             else:
                 logger.warning("Best model not found at expected location")
+                if reporter is not None:
+                    try:
+                        reporter.stop()
+                    except Exception:
+                        pass
                 return None
                 
         except Exception as e:
             logger.error(f"❌ Training failed: {e}")
+            if reporter is not None:
+                try:
+                    reporter.stop()
+                except Exception:
+                    pass
             raise
     
     def _prepare_training_config(self, dataset_yaml_path: Path) -> Dict[str, Any]:

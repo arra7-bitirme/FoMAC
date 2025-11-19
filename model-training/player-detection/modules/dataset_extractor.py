@@ -8,9 +8,9 @@ data ready for YOLO training.
 import csv
 import logging
 import os
-import sys
 import shutil
 import configparser
+import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Set
@@ -473,9 +473,15 @@ class DatasetExtractor:
             if total_frames > 0:
                 frame_ids = sorted(set(frame_ids).union(range(1, total_frames + 1)))
 
+        balance_cfg = self.config.get('snmot', {}).get('balance_frames', {})
+
         for frame_id in frame_ids:
             labels = annotations.get(frame_id, [])
             if not labels and not include_empty:
+                continue
+
+            label_names = self._class_names_from_labels(labels)
+            if not self._should_keep_frame(labels, label_names, balance_cfg):
                 continue
 
             src_image = meta['image_dir'] / f"{frame_id:06d}{meta['image_ext']}"
@@ -498,6 +504,18 @@ class DatasetExtractor:
             if labels:
                 self._write_yolo_label_file(dst_label, labels)
                 stats['labels'] += len(labels)
+                self._maybe_duplicate_minority_frame(
+                    labels,
+                    label_names,
+                    dst_image,
+                    dst_label,
+                    images_out,
+                    labels_out,
+                    image_stem,
+                    meta['image_ext'],
+                    stats,
+                    balance_cfg
+                )
             elif include_empty:
                 dst_label.touch()
 
@@ -723,6 +741,80 @@ class DatasetExtractor:
         with open(label_path, 'w') as label_file:
             for cls_id, xc, yc, w, h in labels:
                 label_file.write(f"{cls_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
+
+    def _class_names_from_labels(
+        self,
+        labels: List[Tuple[int, float, float, float, float]]
+    ) -> Set[str]:
+        names: Set[str] = set()
+        for cls_id, *_ in labels:
+            cls_name = self._get_class_name_for_id(cls_id)
+            if cls_name:
+                names.add(cls_name)
+        return names
+
+    def _get_class_name_for_id(self, class_id: int) -> Optional[str]:
+        if 0 <= class_id < len(self._class_names):
+            return self._class_names[class_id]
+        return None
+
+    def _should_keep_frame(
+        self,
+        labels: List[Tuple[int, float, float, float, float]],
+        label_names: Set[str],
+        balance_cfg: Dict[str, Any]
+    ) -> bool:
+        """Decide whether to keep a frame based on balance configuration."""
+        if not balance_cfg or not balance_cfg.get('enabled'):
+            return True
+
+        if not labels:
+            empty_keep = float(balance_cfg.get('empty_keep_prob', 0.3))
+            return random.random() < empty_keep
+
+        minority_classes = set(balance_cfg.get('minority_classes') or [])
+        if minority_classes and label_names & minority_classes:
+            return True
+
+        majority_classes = set(balance_cfg.get('majority_classes') or [])
+        if majority_classes and label_names and label_names <= majority_classes:
+            keep_prob = float(balance_cfg.get('majority_keep_prob', 0.35))
+            return random.random() < keep_prob
+
+        return True
+
+    def _maybe_duplicate_minority_frame(
+        self,
+        labels: List[Tuple[int, float, float, float, float]],
+        label_names: Set[str],
+        src_image: Path,
+        src_label: Path,
+        images_out: Path,
+        labels_out: Path,
+        image_stem: str,
+        image_ext: str,
+        stats: Dict[str, int],
+        balance_cfg: Dict[str, Any]
+    ):
+        if not balance_cfg or not balance_cfg.get('enabled'):
+            return
+
+        duplicate_count = int(balance_cfg.get('duplicate_minority', 0) or 0)
+        if duplicate_count <= 0:
+            return
+
+        minority_classes = set(balance_cfg.get('minority_classes') or [])
+        if not minority_classes or not (label_names & minority_classes):
+            return
+
+        for dup_idx in range(1, duplicate_count + 1):
+            dup_suffix = f"_min{dup_idx:02d}"
+            dup_image = images_out / f"{image_stem}{dup_suffix}{image_ext}"
+            dup_label = labels_out / f"{image_stem}{dup_suffix}.txt"
+            shutil.copy2(src_image, dup_image)
+            shutil.copy2(src_label, dup_label)
+            stats['frames'] += 1
+            stats['labels'] += len(labels)
 
     def _register_class_name(self, class_name: str) -> int:
         """Register a class name and return its numeric identifier."""

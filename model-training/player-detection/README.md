@@ -140,6 +140,7 @@ device_priority:
 - **Configurable sampling** with max samples per half
 - **Multi-season splitting** (train/val/test)
 - **YOLO format conversion** with validation
+- **SNMOT class balancing** via `balance_frames` (player-only frame subsampling, minority duplication)
 
 ### Training Pipeline
 - **Configuration-driven training** with full YOLO parameter support

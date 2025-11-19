@@ -4,15 +4,30 @@
 dataset_type: "snmot"   # Options: snmot, soccernet
 
 # Extraction control
-run_extraction: true    # Whether to run dataset extraction
-clean_output: true      # Remove previously extracted dataset before running
+run_extraction: true     # Ensure new balancing pass is executed
+clean_output: true       # Remove previously extracted dataset before running
 
 # SNMOT-specific settings
 snmot:
   copy_images: true            # Copy frames into YOLO layout (set false to hardlink when supported)
-  include_empty_frames: false  # Skip frames without any annotations
-  min_confidence: 0.0          # Minimum annotation confidence to keep
+  include_empty_frames: true   # Keep negatives for better precision
+  min_confidence: 0.25         # Drop noisy boxes from very low-confidence tracklets
   clamp_boxes: true            # Clamp bounding boxes to image bounds
+  balance_frames:
+    enabled: true
+    majority_classes:          # Frames containing only these classes can be subsampled
+      - player_team_left
+      - player_team_right
+    minority_classes:          # Always keep + optionally duplicate frames containing these
+      - ball
+      - referee_main
+      - referee_side_top
+      - referee_side_bottom
+      - goalkeeper_team_left
+      - goalkeeper_team_right
+    majority_keep_prob: 0.35   # Keep about 35% of player-only frames
+    empty_keep_prob: 0.3       # Retain a third of empty frames for negatives
+    duplicate_minority: 1      # Duplicate frames that include minority classes once
 
 # Sampling settings (legacy options kept for compatibility)
 max_samples_per_half: null     # SoccerNet only

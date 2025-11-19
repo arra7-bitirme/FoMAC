@@ -416,3 +416,8 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+.venv/
+.runs/
+model-training/player-detection/__pycache__/
+model-training/player-detection/.venv/

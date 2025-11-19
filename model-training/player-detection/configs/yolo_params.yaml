@@ -1,72 +1,140 @@
-# YOLO Model Configuration
+## YOLO Model Configuration
+#
+## Model architecture
+#model: "yolo11n.pt"  # Model architecture file
+#
+## Input configuration
+#imgsz: 640  # Input image size
+#batch: 16   # Batch size
+#
+## Training epochs and optimization
+#epochs: 50  # Number of training epochs
+#pretrained: true  # Use pretrained weights
+#optimizer: "AdamW"  # Optimizer type
+#
+## Learning rate configuration
+#lr0: 0.002      # Initial learning rate
+#lrf: 0.01       # Final learning rate factor
+#momentum: 0.937  # Momentum
+#weight_decay: 0.0005  # Weight decay
+#
+## Warmup settings
+#warmup_epochs: 4        # Warmup epochs
+#warmup_momentum: 0.8    # Warmup momentum
+#warmup_bias_lr: 0.1     # Warmup bias learning rate
+#
+## Loss weights
+#box: 7.5   # Box loss weight
+#cls: 0.4   # Class loss weight
+#dfl: 2.0   # Distribution focal loss weight
+#
+## Data augmentation
+#hsv_h: 0.02        # Hue augmentation
+#hsv_s: 0.5         # Saturation augmentation
+#hsv_v: 0.4         # Value augmentation
+#degrees: 3.0       # Rotation degrees
+#translate: 0.1     # Translation factor
+#scale: 0.5         # Scale factor
+#shear: 0.0         # Shear degrees
+#perspective: 0.0   # Perspective factor
+#flipud: 0.0        # Vertical flip probability
+#fliplr: 0.5        # Horizontal flip probability
+#
+## Advanced augmentation
+#mosaic: 0.8         # Mosaic augmentation probability
+#mixup: 0.05         # Mixup augmentation probability
+#copy_paste: 0.1     # Copy-paste augmentation probability
+#
+## Training settings
+#patience: 30        # Early stopping patience
+#save_period: 5      # Model save period
+#cache: false        # Cache images in RAM
+#rect: false         # Rectangular training
+#cos_lr: true        # Cosine learning rate scheduler
+#close_mosaic: 15    # Close mosaic in last N epochs
+#multi_scale: true   # Multi-scale training
+#dropout: 0.1        # Dropout rate
+#
+## Validation settings
+#val: true     # Validate during training
+#conf: 0.01    # Confidence threshold
+#iou: 0.65     # IoU threshold
+#max_det: 1000 # Maximum detections
+#
+## Performance settings
+#workers: 8      # Number of dataloader workers
+#profile: false  # Profile training
+#fraction: 1.0   # Dataset fraction to use
 
-# Model architecture
-model: "yolo11n.pt"  # Model architecture file
+# YOLO11 — RTX 4000 Ada tuned
 
-# Input configuration
-imgsz: 640  # Input image size
-batch: 16   # Batch size
+model: "yolo11m.pt"          # larger backbone helps tiny ball features
 
-# Training epochs and optimization
-epochs: 50  # Number of training epochs
-pretrained: true  # Use pretrained weights
-optimizer: "AdamW"  # Optimizer type
+# Input
+imgsz: 1024                  # multiple of 32; great for ball recall
+batch: 12                    # per-device batch (effective batch increases via accumulation)
+rect: false                  # keep mosaic compatibility
+multi_scale: true
+resume: false
 
-# Learning rate configuration
-lr0: 0.002      # Initial learning rate
-lrf: 0.01       # Final learning rate factor
-momentum: 0.937  # Momentum
-weight_decay: 0.0005  # Weight decay
+# Training
+epochs: 120
+pretrained: true
+optimizer: "AdamW"
+deterministic: false
 
-# Warmup settings
-warmup_epochs: 4        # Warmup epochs
-warmup_momentum: 0.8    # Warmup momentum
-warmup_bias_lr: 0.1     # Warmup bias learning rate
+# LR/Scheduler
+lr0: 0.0012                  # scaled for effective batch ~48
+lrf: 0.01
+nbs: 64
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 4
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+cos_lr: true
 
-# Loss weights
-box: 7.5   # Box loss weight
-cls: 0.4   # Class loss weight
-dfl: 2.0   # Distribution focal loss weight
+# Loss
+box: 7.5
+cls: 0.6                    # a bit more weight to help ball class separation
+dfl: 2.0
 
-# Data augmentation
-hsv_h: 0.02        # Hue augmentation
-hsv_s: 0.5         # Saturation augmentation
-hsv_v: 0.4         # Value augmentation
-degrees: 3.0       # Rotation degrees
-translate: 0.1     # Translation factor
-scale: 0.5         # Scale factor
-shear: 0.0         # Shear degrees
-perspective: 0.0   # Perspective factor
-flipud: 0.0        # Vertical flip probability
-fliplr: 0.5        # Horizontal flip probability
+# Augmentation (balanced for tiny + full-body targets)
+hsv_h: 0.015
+hsv_s: 0.5
+hsv_v: 0.4
+degrees: 0.8
+translate: 0.08
+scale: 0.5
+shear: 0.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
 
-# Advanced augmentation
-mosaic: 0.8         # Mosaic augmentation probability
-mixup: 0.05         # Mixup augmentation probability
-copy_paste: 0.1     # Copy-paste augmentation probability
+# Advanced aug
+mosaic: 0.35
+mixup: 0.05
+copy_paste: 0.25
+erasing: 0.1
+close_mosaic: 25             # last epochs w/o mosaic sharpen boxes
 
-# Training settings
-patience: 30        # Early stopping patience
-save_period: 5      # Model save period
-cache: false        # Cache images in RAM
-rect: false         # Rectangular training
-cos_lr: true        # Cosine learning rate scheduler
-close_mosaic: 15    # Close mosaic in last N epochs
-multi_scale: true   # Multi-scale training
-dropout: 0.1        # Dropout rate
+# Validation / NMS
+val: true
+augment: false
+auto_augment: false
+conf: 0.05
+iou: 0.6
+max_det: 300
 
-# Validation settings
-val: true     # Validate during training
-conf: 0.01    # Confidence threshold
-iou: 0.65     # IoU threshold
-max_det: 1000 # Maximum detections
-
-# Performance settings
-workers: 8      # Number of dataloader workers
-profile: false  # Profile training
-fraction: 1.0   # Dataset fraction to use
+# Performance
+workers: 8
+cache: false
+patience: 30
+save_period: 5
+profile: false
+fraction: 1.0
 
 # Project settings
-project_name: "football_detector_optimized"
+project_name: "football_detector_snmot"
 exist_ok: true
 save: true

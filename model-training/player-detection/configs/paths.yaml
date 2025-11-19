@@ -2,8 +2,8 @@
 # All paths can be absolute or relative to workspace root
 
 workspace_root: "."
-snmot_root: "tracking"
-output_root: "datasets/snmot_detection"
+snmot_root: "/mnt/sasarchiveir/Intern/Eray/tracking"
+output_root: "/mnt/sasarchiveir/Intern/Eray/datasets/snmot_detection"
 models_root: "models"
 reports_root: "reports"  # Root directory for all training reports
 
