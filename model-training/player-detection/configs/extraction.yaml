@@ -4,8 +4,8 @@
 dataset_type: "snmot"   # Options: snmot, soccernet
 
 # Extraction control
-run_extraction: true     # Ensure new balancing pass is executed
-clean_output: true       # Remove previously extracted dataset before running
+run_extraction: false     # Ensure new balancing pass is executed
+clean_output: false       # Remove previously extracted dataset before running
 
 # SNMOT-specific settings
 snmot:
@@ -28,6 +28,15 @@ snmot:
     majority_keep_prob: 0.35   # Keep about 35% of player-only frames
     empty_keep_prob: 0.3       # Retain a third of empty frames for negatives
     duplicate_minority: 1      # Duplicate frames that include minority classes once
+
+    instance_caps:
+      enabled: true
+      target_splits: ["train"]   # apply only on training split
+      shuffle_sequences: true
+      shuffle_frames: true
+      classes:
+        player_team_left: 80000
+        player_team_right: 80000
 
 # Sampling settings (legacy options kept for compatibility)
 max_samples_per_half: null     # SoccerNet only

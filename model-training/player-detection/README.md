@@ -141,6 +141,7 @@ device_priority:
 - **Multi-season splitting** (train/val/test)
 - **YOLO format conversion** with validation
 - **SNMOT class balancing** via `balance_frames` (player-only frame subsampling, minority duplication)
+- **Instance caps** to randomly downsample over-represented classes (e.g., keep only 80k player boxes)
 
 ### Training Pipeline
 - **Configuration-driven training** with full YOLO parameter support

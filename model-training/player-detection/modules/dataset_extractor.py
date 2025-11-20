@@ -46,6 +46,12 @@ class DatasetExtractor:
         for class_name in initial_class_names:
             self._register_class_name(class_name)
         
+        snmot_cfg = config.get('snmot', {})
+        self._balance_config = snmot_cfg.get('balance_frames', {})
+        self._instance_caps_cfg = snmot_cfg.get('instance_caps', {})
+        self._instance_caps_state: Dict[str, Dict[str, int]]
+        self._instance_caps_state = defaultdict(dict)
+        
     def extract_dataset(self) -> Path:
         """
         Extract the configured dataset into YOLO-ready format.
@@ -429,12 +435,17 @@ class DatasetExtractor:
             logger.warning(f"No sequences found for split {split_name} in {source_dir}")
             return stats
 
+        if self._instance_caps_enabled_for_split(split_name) and \
+                self._instance_caps_cfg.get('shuffle_sequences', True):
+            random.shuffle(sequence_dirs)
+
         for sequence_dir in tqdm(sequence_dirs, desc=f"Extracting {split_name.upper()}"):
             try:
                 seq_stats = self._process_snmot_sequence(
                     sequence_dir,
                     images_out,
                     labels_out,
+                    split_name=split_name,
                     copy_images=copy_images,
                     include_empty=include_empty
                 )
@@ -454,6 +465,7 @@ class DatasetExtractor:
         images_out: Path,
         labels_out: Path,
         *,
+        split_name: str,
         copy_images: bool,
         include_empty: bool
     ) -> Dict[str, int]:
@@ -473,7 +485,10 @@ class DatasetExtractor:
             if total_frames > 0:
                 frame_ids = sorted(set(frame_ids).union(range(1, total_frames + 1)))
 
-        balance_cfg = self.config.get('snmot', {}).get('balance_frames', {})
+        balance_cfg = self._balance_config
+        apply_caps = self._instance_caps_enabled_for_split(split_name)
+        if apply_caps and self._instance_caps_cfg.get('shuffle_frames', True):
+            random.shuffle(frame_ids)
 
         for frame_id in frame_ids:
             labels = annotations.get(frame_id, [])
@@ -483,6 +498,11 @@ class DatasetExtractor:
             label_names = self._class_names_from_labels(labels)
             if not self._should_keep_frame(labels, label_names, balance_cfg):
                 continue
+
+            if apply_caps:
+                labels = self._apply_instance_caps(labels, split_name)
+                if not labels and not include_empty:
+                    continue
 
             src_image = meta['image_dir'] / f"{frame_id:06d}{meta['image_ext']}"
             if not src_image.exists():
@@ -757,6 +777,54 @@ class DatasetExtractor:
         if 0 <= class_id < len(self._class_names):
             return self._class_names[class_id]
         return None
+
+    def _instance_caps_enabled_for_split(self, split_name: Optional[str]) -> bool:
+        if not split_name:
+            return False
+        cfg = self._instance_caps_cfg or {}
+        if not cfg.get('enabled'):
+            return False
+        target_splits = cfg.get('target_splits')
+        return not target_splits or split_name in target_splits
+
+    def _apply_instance_caps(
+        self,
+        labels: List[Tuple[int, float, float, float, float]],
+        split_name: str
+    ) -> List[Tuple[int, float, float, float, float]]:
+        if not labels:
+            return labels
+
+        class_caps = self._instance_caps_cfg.get('classes') or {}
+        if not class_caps:
+            return labels
+
+        state = self._instance_caps_state.setdefault(
+            split_name,
+            defaultdict(int)
+        )
+        filtered: List[Tuple[int, float, float, float, float]] = []
+
+        for label in labels:
+            cls_id = label[0]
+            class_name = self._get_class_name_for_id(cls_id)
+            if not class_name:
+                filtered.append(label)
+                continue
+
+            cap = class_caps.get(class_name)
+            if cap is None:
+                filtered.append(label)
+                continue
+
+            current = state[class_name]
+            if current >= cap:
+                continue
+
+            state[class_name] = current + 1
+            filtered.append(label)
+
+        return filtered
 
     def _should_keep_frame(
         self,
