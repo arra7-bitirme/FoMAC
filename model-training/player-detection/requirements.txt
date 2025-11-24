@@ -19,6 +19,7 @@ tqdm>=4.62.0
 matplotlib>=3.5.0
 seaborn>=0.11.0
 openpyxl>=3.0.0
+tensorboard>=2.13.0
 
 # Optional: DirectML support for Windows GPU acceleration
 # torch-directml>=0.1.13.1.dev230119

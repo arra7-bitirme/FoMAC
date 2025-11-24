@@ -51,6 +51,7 @@ class DatasetExtractor:
         self._instance_caps_cfg = snmot_cfg.get('instance_caps', {})
         self._instance_caps_state: Dict[str, Dict[str, int]]
         self._instance_caps_state = defaultdict(dict)
+        self._label_transform_cfg = snmot_cfg.get('label_transform') or {}
         
     def extract_dataset(self) -> Path:
         """
@@ -712,6 +713,10 @@ class DatasetExtractor:
                         missing_tracklets.add(track_id)
                     continue
 
+                class_name = self._transform_class_name(class_name)
+                if not class_name:
+                    continue
+
                 if min_box and (w < min_box or h < min_box):
                     continue
 
@@ -751,6 +756,50 @@ class DatasetExtractor:
             )
 
         return dict(annotations)
+
+    def _transform_class_name(self, class_name: Optional[str]) -> Optional[str]:
+        """Apply label transformation rules defined in configuration."""
+        if not class_name:
+            return None
+
+        cfg = self._label_transform_cfg or {}
+        if cfg.get('enabled') is False:
+            return class_name
+
+        original_name = class_name
+        new_name: Optional[str] = None
+
+        groups = cfg.get('groups') or {}
+        for target_name, source_list in groups.items():
+            if original_name in (source_list or []):
+                new_name = target_name
+                break
+
+        if new_name is None:
+            rename_map = cfg.get('rename') or {}
+            if original_name in rename_map:
+                new_name = rename_map[original_name]
+
+        if new_name is None:
+            default_group = cfg.get('default_group')
+            if default_group and groups:
+                new_name = default_group
+            elif cfg.get('drop_unmatched'):
+                return None
+            else:
+                new_name = original_name
+
+        include_names = cfg.get('include')
+        if include_names:
+            include_set = set(include_names)
+            if new_name not in include_set:
+                return None
+
+        exclude_names = cfg.get('exclude')
+        if exclude_names and new_name in set(exclude_names):
+            return None
+
+        return new_name
 
     def _write_yolo_label_file(
         self,

@@ -74,7 +74,37 @@ python main.py --evaluate
 
 # Run inference
 python main.py --predict /path/to/images_or_video
+ 
+# Visualize a couple of SNMOT sequences with bounding boxes
+python visualize_sequences.py --snmot-root /path/to/snmot --split train --limit 2
 ```
+
+### 🧪 Two-Phase Training Workflow
+
+Highly imbalanced SNMOT labels can now be tackled with a dual-pass strategy:
+
+1. **Phase 1 — Player-focused:** trains a tri-class detector (`player_team_left`, `player_team_right`, `other`). All non-player entities collapse into the `other` bucket, letting the model specialize on player separation without class imbalance caps.
+2. **Phase 2 — "Other" fine-tune:** starts from Phase 1's `best.pt`, re-extracts the dataset with only `other` labels (players removed), and fine-tunes the checkpoint solely on those negatives. The resulting weight specializes in distinguishing anything that's *not* a tracked player, while keeping Phase 1 knowledge intact.
+
+Each phase ships with its own config bundle under `configs/phases/<phaseN>/`. Run them sequentially with the new helper script:
+
+```bash
+# From FoMAC/model-training/player-detection
+python two_phase_training.py
+
+# Only run the first phase (extract + train)
+python two_phase_training.py --phases phase1
+
+# Re-train using already extracted datasets
+python two_phase_training.py --train-only
+```
+
+Behind the scenes the extractor applies per-phase label remapping rules (`label_transform`) so you automatically get:
+
+- Phase 1 dataset @ `/mnt/sasarchiveir/Intern/Eray/datasets/snmot_detection_phase1`
+- Phase 2 dataset @ `/mnt/sasarchiveir/Intern/Eray/datasets/snmot_detection_phase2`
+
+Feel free to open the phase-specific YAML files to tweak sampling or YOLO hyperparameters before rerunning the helper script.
 
 ## ⚙️ Configuration
 

@@ -1,0 +1,58 @@
+# Phase 2 Extraction Configuration (specialist for former "other" classes)
+
+dataset_type: "snmot"
+run_extraction: true
+clean_output: true
+
+snmot:
+  copy_images: true
+  include_empty_frames: true
+  min_confidence: 0.2
+  clamp_boxes: true
+  balance_frames:
+    enabled: false
+    majority_classes: []
+    minority_classes: []
+    majority_keep_prob: 1.0
+    empty_keep_prob: 0.5
+    duplicate_minority: 0
+    instance_caps:
+      enabled: false
+      target_splits: ["train"]
+      shuffle_sequences: true
+      shuffle_frames: true
+      classes: {}
+
+  label_transform:
+    enabled: true
+    groups:
+      other:
+        - ball
+        - referee_main
+        - referee_side_top
+        - referee_side_bottom
+        - goalkeeper_team_left
+        - goalkeeper_team_right
+        - other
+    default_group: null
+    drop_unmatched: true
+    include:
+      - other
+    exclude:
+      - player_team_left
+      - player_team_right
+    rename: {}
+
+max_samples_per_half: null
+min_box_size: 4
+
+class_names:
+  - other
+
+season_splits:
+  train: ["2014-2015"]
+  val: ["2015-2016"]
+  test: ["2016-2017"]
+
+scale_mode: "scale"
+validate_boxes: true

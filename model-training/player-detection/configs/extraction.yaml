@@ -30,13 +30,20 @@ snmot:
     duplicate_minority: 1      # Duplicate frames that include minority classes once
 
     instance_caps:
-      enabled: true
-      target_splits: ["train"]   # apply only on training split
+      enabled: false          # disable per-class caps to keep full player distribution
+      target_splits: ["train"]
       shuffle_sequences: true
       shuffle_frames: true
-      classes:
-        player_team_left: 80000
-        player_team_right: 80000
+      classes: {}
+
+  label_transform:
+    enabled: false
+    groups: {}
+    default_group: null
+    drop_unmatched: false
+    include: []
+    exclude: []
+    rename: {}
 
 # Sampling settings (legacy options kept for compatibility)
 max_samples_per_half: null     # SoccerNet only

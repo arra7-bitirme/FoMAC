@@ -71,7 +71,7 @@ class ConfigManager:
         configs = {}
         
         # Define standard config files
-        config_files = ['paths', 'yolo_params', 'extraction', 'device']
+        config_files = ['paths', 'yolo_params', 'extraction', 'device', 'visualization']
         
         for config_name in config_files:
             try:
@@ -155,6 +155,32 @@ class ConfigManager:
         training_group.add_argument(
             '--project-name',
             help='Training project name'
+        )
+
+        # Visualization options
+        viz_group = parser.add_argument_group('Visualization')
+        viz_group.add_argument(
+            '--tensorboard',
+            action='store_true',
+            help='Launch TensorBoard server during the run'
+        )
+        viz_group.add_argument(
+            '--tensorboard-logdir',
+            help='Directory for TensorBoard to watch'
+        )
+        viz_group.add_argument(
+            '--tensorboard-host',
+            help='TensorBoard host (default: 127.0.0.1)'
+        )
+        viz_group.add_argument(
+            '--tensorboard-port',
+            type=int,
+            help='TensorBoard port (default: 6006)'
+        )
+        viz_group.add_argument(
+            '--tensorboard-open-browser',
+            action='store_true',
+            help='Automatically open browser when TensorBoard starts'
         )
         
         # Logging
@@ -255,6 +281,19 @@ class ConfigManager:
             merged['yolo_params']['lr0'] = args.lr0
         if args.project_name:
             merged['yolo_params']['project_name'] = args.project_name
+
+        # Visualization overrides
+        viz_cfg = merged.setdefault('visualization', {}).setdefault('tensorboard', {})
+        if args.tensorboard:
+            viz_cfg['enabled'] = True
+        if args.tensorboard_logdir:
+            viz_cfg['logdir'] = args.tensorboard_logdir
+        if args.tensorboard_host:
+            viz_cfg['host'] = args.tensorboard_host
+        if args.tensorboard_port is not None:
+            viz_cfg['port'] = args.tensorboard_port
+        if args.tensorboard_open_browser:
+            viz_cfg['open_browser'] = True
         
         return merged
 

@@ -74,10 +74,10 @@ model: "yolo11m.pt"          # larger backbone helps tiny ball features
 imgsz: 1024                  # multiple of 32; great for ball recall
 batch: 12                    # per-device batch (effective batch increases via accumulation)
 rect: false                  # keep mosaic compatibility
-multi_scale: true
+multi_scale: false
 resume: false
 
-# Training
+# Trainings
 epochs: 120
 pretrained: true
 optimizer: "AdamW"
@@ -112,11 +112,11 @@ flipud: 0.0
 fliplr: 0.5
 
 # Advanced aug
-mosaic: 0.35
-mixup: 0.05
-copy_paste: 0.25
-erasing: 0.1
-close_mosaic: 25             # last epochs w/o mosaic sharpen boxes
+#mosaic: 0.35
+#mixup: 0.05
+#copy_paste: 0.25
+#erasing: 0.1
+#close_mosaic: 25             # last epochs w/o mosaic sharpen boxes
 
 # Validation / NMS
 val: true

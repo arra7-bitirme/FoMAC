@@ -1,0 +1,10 @@
+# Phase 2 path overrides
+workspace_root: "."
+snmot_root: "/mnt/sasarchiveir/Intern/Eray/tracking"
+output_root: "/mnt/sasarchiveir/Intern/Eray/datasets/snmot_detection_phase2"
+models_root: "models"
+reports_root: "reports"
+dataset_yaml: "dataset.yaml"
+train_split: "train"
+val_split: "test"
+test_split: "test"
