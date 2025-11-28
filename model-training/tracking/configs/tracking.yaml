@@ -1,0 +1,20 @@
+detection:
+  weights: ..\ball-detection\models\player_ball_detector\weights\best.pt
+  conf: 0.28
+  iou: 0.5
+  imgsz: 1280
+
+tracking:
+  tracker_yaml: configs/trackers/strongsort_soccer.yaml
+  reid_weights: outputs/reid/checkpoints/best_reid.pt
+  device: auto
+  save_visualizations: false
+  half: false
+  vid_stride: 1
+
+datasets:
+  root: ..\..\tracking-datasets
+  sequences:
+    - SNMOT-060
+  output_dir: outputs/tracks
+  limit_frames: null
