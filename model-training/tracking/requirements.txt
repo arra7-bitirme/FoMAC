@@ -11,3 +11,5 @@ scipy>=1.11
 filterpy>=1.4.5
 lapx>=0.5.5
 matplotlib>=3.8
+scikit-learn>=1.3
+motmetrics>=1.4

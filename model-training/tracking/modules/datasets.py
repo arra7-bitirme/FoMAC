@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import configparser
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -12,39 +13,67 @@ from torch.utils.data import Dataset
 # ------------------------------- SoccerNet ReID -------------------------------
 
 def parse_soccernet_filename(path: Path) -> Dict[str, str]:
-    """Parse SoccerNet ReID filename metadata.
+    """Parse SoccerNet/SN-ReID filename metadata.
 
-    Format reference:
-    <bbox_idx>_<action_idx>_<person_uid>_<frame_idx>_<class>_<ID>_<UAI>_<HxW>.png
-    Class isimleri alt tire içerebileceği için ortadaki segmentler birleştirilir.
+    Handles both underscore-separated (legacy) and dash-separated (public
+    SoccerNet ReID) naming conventions:
+
+    - ``0001_002_003_004_Player_team_left_a_005r000_003c178b000c_146x68.png``
+    - ``3032-108-1816-282-Player_team_left-a-005r000_003c178b000c-146x68.png``
     """
 
     stem = path.stem
-    parts = stem.split("_")
+    match = re.match(r"(\d+)([-_])", stem)
+    delim = match.group(2) if match else "_"
+
+    # Separate the trailing HxW block if present
+    main, sep, shape_part = stem.rpartition(delim)
+    if sep and "x" in shape_part and all(part.isdigit() for part in shape_part.split("x") if part):
+        base = main
+    else:
+        base = stem
+        shape_part = ""
+
+    parts = base.split(delim, 4)
+    while len(parts) < 5:
+        parts.append("")
+
+    bbox_idx, action_idx, person_uid, frame_idx, tail = parts[:5]
+    tail_segments = tail.rsplit(delim, 3)
+    while len(tail_segments) < 3:
+        tail_segments.append("")
+
+    class_label = tail_segments[0]
+    id_part = tail_segments[1]
+    uai_part = delim.join(tail_segments[2:]) or ""
+
+    if not shape_part:
+        # If HxW was still in the string, pop it now
+        maybe_rest, maybe_shape = uai_part.rsplit(delim, 1) if delim in uai_part else (uai_part, "")
+        if "x" in maybe_shape and all(part.isdigit() for part in maybe_shape.split("x") if part):
+            shape_part = maybe_shape
+            uai_part = maybe_rest
+
     meta = {
         "filename": path.name,
-        "bbox_idx": parts[0] if len(parts) > 0 else "0",
-        "action_idx": parts[1] if len(parts) > 1 else "0",
-        "person_uid": parts[2] if len(parts) > 2 else stem,
-        "frame_idx": parts[3] if len(parts) > 3 else "0",
-        "class_label": "unknown",
-        "id": "unknown",
-        "uai": "unknown",
+        "bbox_idx": bbox_idx or "0",
+        "action_idx": action_idx or "0",
+        "person_uid": person_uid or stem,
+        "frame_idx": frame_idx or "0",
+        "class_label": class_label or "unknown",
+        "id": id_part or "unknown",
+        "uai": uai_part or "unknown",
         "height": -1,
         "width": -1,
     }
 
-    if len(parts) >= 7:
-        meta["id"] = parts[-3]
-        meta["uai"] = parts[-2]
-        shape_part = parts[-1]
-        if "x" in shape_part:
-            h, w = shape_part.split("x")
-            meta["height"] = int(h) if h.isdigit() else -1
-            meta["width"] = int(w) if w.isdigit() else -1
-        class_tokens = parts[4:-3]
-        if class_tokens:
-            meta["class_label"] = "_".join(class_tokens)
+    if "x" in shape_part:
+        h, w = shape_part.split("x", 1)
+        if h.isdigit():
+            meta["height"] = int(h)
+        if w.isdigit():
+            meta["width"] = int(w)
+
     return meta
 
 

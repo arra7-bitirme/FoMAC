@@ -21,4 +21,4 @@ with_reid: True
 half: False
 save_txt: False
 save_vid: False
-device: auto
+device: cuda:0
