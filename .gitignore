@@ -417,29 +417,158 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Dataset files (large binary files)
-model-training/ball-detection/ballDataset/*
+# ============================================================================
+# FoMAC Project-Specific Ignores
+# ============================================================================
+
+# Python virtual environments
+**/.venv/
+**/venv/
+**/.virtualenv/
+**/env/
+**/.env
+
+# Python cache and bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# pytest cache
+.pytest_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# ============================================================================
+# ML/AI Training Artifacts
+# ============================================================================
+
+# Large dataset directories
+model-training/ball-detection/ballDataset/
 model-training/ball-detection/soccerNet/
 model-training/player-detection/datasets/
+**/snmot_detection/
+**/snmot_detection_phase1/
+**/snmot_detection_phase2/
+**/tracking/
+datasets/
+soccerNet/
 
-# Python cache and temporary files
-**/__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-.pytest_cache/
+# YOLO model weights (except pretrained base models needed for training)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+!yolo11n.pt
+!yolo11m.pt
+!yolo11l.pt
+!yolo11x.pt
+# Keep best models but ignore epoch checkpoints
+models/**/weights/epoch*.pt
+models/**/weights/last.pt
 
-# Jupyter Notebook checkpoints
-.ipynb_check
+# Training outputs and logs
+runs/
+outputs/
+**/runs/
+**/outputs/
+wandb/
+mlruns/
+mlflow/
+lightning_logs/
 
-# Temporary and cache files
-*.cache
-*.tmp
-temp/
-tmp/
-.DS_Store
+# Training reports and visualizations
+reports/**/plots_*/
+**/reports/**/plots_*/
+snmot_viz/
+**/snmot_viz/
 
-# Training outputs and predictions
+# Prediction and analysis outputs
 predictions_output/
 **/predictions_output/
 comparison_analysis_*/
+**/comparison_analysis_*/
+
+# TensorBoard logs
+events.out.tfevents.*
+**/events.out.tfevents.*
+
+# ============================================================================
+# IDE and Editor Files
+# ============================================================================
+
+# VSCode workspace settings (project-specific, keep basic settings)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# PyCharm
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ============================================================================
+# OS-Specific Files
+# ============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.directory
+.Trash-*
+
+# ============================================================================
+# Temporary and Cache Files
+# ============================================================================
+
+*.cache
+*.tmp
+*.temp
+temp/
+tmp/
+*.log
+*.bak
+*.swp
+*~
