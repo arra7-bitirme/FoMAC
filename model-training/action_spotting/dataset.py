@@ -15,7 +15,7 @@ class SoccerNetDataset(Dataset):
 
     def _prepare_samples(self):
         samples = []
-        print(f"[{self.split.upper()}] Veri ve Gaussian Etiketler hazırlanıyor...")
+        print(f"[{self.split.upper()}] Veri (Pozitif + Negatif) hazırlanıyor...")
         
         for root, dirs, files in os.walk(self.root_dir):
             if "Labels-v2.json" not in files: continue
@@ -35,7 +35,6 @@ class SoccerNetDataset(Dataset):
                 if ann["label"] not in cfg.EVENT_DICTIONARY: continue
                 game_time = ann["gameTime"]
                 
-                # Zaman formatını güvenli ayrıştır
                 try:
                     half = int(game_time.split(' - ')[0])
                     time_parts = game_time.split(' - ')[1].split(':')
@@ -43,11 +42,12 @@ class SoccerNetDataset(Dataset):
                     frame = int(seconds * cfg.FRAMERATE)
                     events.append({'half': half, 'frame': frame, 'label': cfg.EVENT_DICTIONARY[ann["label"]]})
                 except:
-                    continue # Hatalı format varsa atla
+                    continue
 
-            # STRATEJİ: Her olay için bir pencere oluştur
+            # STRATEJİ: Her olay için 1 Pozitif + 1 Negatif örnek
             for evt in events:
-                # Data Augmentation: Olayı pencerenin içinde hafifçe kaydır
+                # --- 1. POZİTİF ÖRNEK (OLAY) ---
+                # Data Augmentation: Olayı pencerenin içinde hafifçe kaydır (-5 ile +5 kare)
                 shift = random.randint(-5, 5) 
                 center = evt['frame'] + shift
                 
@@ -56,7 +56,23 @@ class SoccerNetDataset(Dataset):
                     "half": evt['half'],
                     "window_center": center, 
                     "event_frame": evt['frame'],
-                    "label_class": evt['label']
+                    "label": evt['label'],      # utils.py 'label' bekliyor
+                    "is_background": False      # utils.py bunu bekliyor
+                })
+
+                # --- 2. NEGATİF ÖRNEK (BACKGROUND) ---
+                # Olaydan rastgele bir uzaklıkta (örn: 10-50 sn uzağında) boş bir an seç
+                # Bu sayede model "Olay Yok" durumunu da öğrenir.
+                bg_shift = random.choice([-100, -80, -60, 60, 80, 100]) # Frame cinsinden uzaklık
+                bg_center = evt['frame'] + bg_shift
+                
+                samples.append({
+                    "path": root,
+                    "half": evt['half'],
+                    "window_center": bg_center,
+                    "event_frame": -1,          # Olay yok
+                    "label": -1,                # Etiket yok
+                    "is_background": True       # Bu bir background
                 })
         
         print(f"Toplam eğitilecek pencere sayısı: {len(samples)}")
@@ -68,56 +84,45 @@ class SoccerNetDataset(Dataset):
     def __getitem__(self, idx):
         item = self.samples[idx]
         
-        # 1. Özellikleri Yükle (Memory Map ile)
+        # 1. Özellikleri Yükle
         feat_path = os.path.join(item['path'], f"{item['half']}_baidu_soccer_embeddings.npy")
         try:
             full_features = np.load(feat_path, mmap_mode='r')
         except:
-            # Dosya bozuksa veya yoksa sıfır dolu tensör döndür (Kodu kırmamak için)
             return torch.zeros((cfg.FEATURE_DIM, cfg.WINDOW_FRAME)), torch.zeros((cfg.NUM_CLASSES, cfg.WINDOW_FRAME))
         
-        # 2. GÜVENLİ PENCERE KESME (BUFFER YÖNTEMİ)
-        # np.pad yerine, önce boş bir tuval (buffer) oluşturuyoruz.
-        # Böylece "negatif index" veya "boş array" hatası asla oluşmaz.
-        
+        # 2. GÜVENLİ PENCERE KESME
         total_frames = full_features.shape[0]
         feature_dim = full_features.shape[1]
         half_win = cfg.WINDOW_FRAME // 2
         
-        # İstenen başlangıç ve bitiş
         start_idx = item['window_center'] - half_win
         end_idx = item['window_center'] + half_win
         
-        # Boş Buffer (Tüm değerler 0)
         buffer = np.zeros((cfg.WINDOW_FRAME, feature_dim), dtype=np.float32)
         
-        # Geçerli aralığı hesapla (Intersection)
         valid_start = max(0, start_idx)
         valid_end = min(total_frames, end_idx)
         
-        # Buffer içinde nereye yapıştıracağız?
         buf_start = valid_start - start_idx
         buf_end = buf_start + (valid_end - valid_start)
         
-        # Kopyalama işlemi (Eğer geçerli bir aralık varsa)
         if valid_end > valid_start:
-            # .copy() ekleyerek "not writable" uyarısını çözüyoruz
             buffer[buf_start:buf_end] = full_features[valid_start:valid_end].copy()
             
-        # Tensor'a çevir: (Time, Channels) -> (Channels, Time)
         features = torch.from_numpy(buffer).float().transpose(0, 1)
 
         # 3. GAUSSIAN SOFT LABEL OLUŞTURMA
         target = torch.zeros((cfg.NUM_CLASSES, cfg.WINDOW_FRAME), dtype=torch.float32)
         
-        # Olayın pencere içindeki göreli konumu
-        # Buffer mantığına göre hesaplıyoruz
-        relative_event_pos = item['event_frame'] - start_idx
-        
-        if 0 <= relative_event_pos < cfg.WINDOW_FRAME:
-            x = np.arange(0, cfg.WINDOW_FRAME)
-            # Gaussian Tepeciği
-            gaussian = np.exp(-0.5 * ((x - relative_event_pos) / cfg.LABEL_SIGMA) ** 2)
-            target[item['label_class'], :] = torch.from_numpy(gaussian).float()
+        # Eğer bu bir Background örneği ise hedef tamamen 0 kalır (Sessizlik).
+        # Eğer Olay örneği ise Gaussian tepeciği oluşturulur.
+        if not item['is_background']:
+            relative_event_pos = item['event_frame'] - start_idx
+            
+            if 0 <= relative_event_pos < cfg.WINDOW_FRAME:
+                x = np.arange(0, cfg.WINDOW_FRAME)
+                gaussian = np.exp(-0.5 * ((x - relative_event_pos) / cfg.LABEL_SIGMA) ** 2)
+                target[item['label'], :] = torch.from_numpy(gaussian).float()
 
         return features, target
