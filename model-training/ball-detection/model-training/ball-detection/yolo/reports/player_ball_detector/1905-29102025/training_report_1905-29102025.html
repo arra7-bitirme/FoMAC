@@ -1,0 +1,222 @@
+
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>YOLO Training Report</title>
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    line-height: 1.6;
+                    margin: 0;
+                    padding: 20px;
+                    background-color: #f5f5f5;
+                }
+                .container {
+                    max-width: 1400px;
+                    margin: 0 auto;
+                    background: white;
+                    padding: 30px;
+                    border-radius: 10px;
+                    box-shadow: 0 0 20px rgba(0,0,0,0.1);
+                }
+                .header {
+                    text-align: center;
+                    margin-bottom: 30px;
+                    padding-bottom: 20px;
+                    border-bottom: 3px solid #3498db;
+                }
+                .header h1 {
+                    color: #2c3e50;
+                    margin: 0;
+                    font-size: 2.5em;
+                }
+                .timestamp {
+                    color: #7f8c8d;
+                    font-style: italic;
+                }
+                .section {
+                    margin: 30px 0;
+                    padding: 20px;
+                    background: #f8f9fa;
+                    border-radius: 8px;
+                    border-left: 4px solid #3498db;
+                }
+                .section h2 {
+                    color: #2c3e50;
+                    margin-top: 0;
+                }
+                .metric-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                    gap: 20px;
+                    margin: 20px 0;
+                }
+                .metric-card {
+                    background: white;
+                    padding: 15px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+                .metric-label {
+                    font-weight: bold;
+                    color: #34495e;
+                }
+                .metric-value {
+                    font-size: 1.2em;
+                    color: #3498db;
+                    margin-top: 5px;
+                }
+                .plot {
+                    text-align: center;
+                    margin: 20px 0;
+                }
+                .plot img {
+                    max-width: 100%;
+                    height: auto;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+                }
+                .config-table, .metrics-table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 20px 0;
+                }
+                .config-table th, .config-table td, .metrics-table th, .metrics-table td {
+                    padding: 12px;
+                    text-align: left;
+                    border-bottom: 1px solid #ddd;
+                }
+                .config-table th, .metrics-table th {
+                    background-color: #3498db;
+                    color: white;
+                }
+                .config-table tr:hover, .metrics-table tr:hover {
+                    background-color: #f5f5f5;
+                }
+                .metrics-table td {
+                    text-align: center;
+                }
+                .metrics-table .epoch-col {
+                    font-weight: bold;
+                }
+                .best-epoch {
+                    background-color: #d5f4e6 !important;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🏆 YOLO Training Report</h1>
+                    <p class="timestamp">Generated: 2025-10-29 19:05:04</p>
+                </div>
+                
+                <div class="section">
+                    <h2>📊 Executive Summary</h2>
+                    <div class="metric-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Model Architecture</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Total Epochs</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Batch Size</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Image Size</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Device</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Dataset Classes</div>
+                            <div class="metric-value">N/A</div>
+                        </div>
+                    </div>
+                </div>
+        
+            <div class="section">
+                <h2>📋 Detailed Training Metrics</h2>
+                <p>Epoch-by-epoch training progress with all metrics:</p>
+                <div style="overflow-x: auto;">
+                    <table class="metrics-table">
+                        <thead>
+                            <tr>
+                                <th>Epoch</th>
+        <th>time</th><th>train/box_loss</th><th>train/cls_loss</th><th>train/dfl_loss</th><th>metrics/precision(B)</th><th>metrics/recall(B)</th><th>metrics/mAP50(B)</th><th>metrics/mAP50-95(B)</th><th>val/box_loss</th><th>val/cls_loss</th><th>val/dfl_loss</th><th>lr/pg0</th><th>lr/pg1</th><th>lr/pg2</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        <tr class="best-epoch"><td class="epoch-col">1</td><td>785.0100</td><td>2.7827</td><td>2.8244</td><td>2.1355</td><td>0.6671</td><td>0.0009</td><td>0.0008</td><td>0.0001</td><td>3.8744</td><td>286.6280</td><td>4.3029</td><td>0.0961</td><td>0.0001</td><td>0.0001</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p><small><strong>Note:</strong> Best epoch is highlighted in green.</small></p>
+            </div>
+        
+                <div class="section">
+                    <h2>📈 Training Progress</h2>
+            
+                        <div class="plot">
+                            <h3>📉 Loss Curves</h3>
+                            <img src="plots_1905-29102025/loss_curves.png" alt="📉 Loss Curves">
+                        </div>
+                    
+                        <div class="plot">
+                            <h3>📊 mAP Curves</h3>
+                            <img src="plots_1905-29102025/map_curves.png" alt="📊 mAP Curves">
+                        </div>
+                    
+                        <div class="plot">
+                            <h3>📋 Detailed Training Metrics</h3>
+                            <img src="plots_1905-29102025/detailed_metrics.png" alt="📋 Detailed Training Metrics">
+                        </div>
+                    
+                        <div class="plot">
+                            <h3>📈 Learning Rate Schedule</h3>
+                            <img src="plots_1905-29102025/learning_rate.png" alt="📈 Learning Rate Schedule">
+                        </div>
+                    
+                        <div class="plot">
+                            <h3>🎯 Performance Comparison</h3>
+                            <img src="plots_1905-29102025/performance_comparison.png" alt="🎯 Performance Comparison">
+                        </div>
+                    
+                        <div class="plot">
+                            <h3>⚙️ Configuration Summary</h3>
+                            <img src="plots_1905-29102025/config_summary.png" alt="⚙️ Configuration Summary">
+                        </div>
+                    </div>
+            <div class="section">
+                <h2>⚙️ Configuration Details</h2>
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        <tr><td>Optimizer</td><td>N/A</td></tr><tr><td>Learning Rate</td><td>N/A</td></tr><tr><td>Weight Decay</td><td>N/A</td></tr><tr><td>Workers</td><td>N/A</td></tr><tr><td>AMP Enabled</td><td>N/A</td></tr><tr><td>Model Path</td><td>/home/alperen/fomac/FoMAC/model-training/ball-detection/models/player_ball_detector/weights/best.pt</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        
+                <div class="section">
+                    <h2>📝 Notes</h2>
+                    <p>This report was automatically generated by the YOLO Training Pipeline.</p>
+                    <p>For detailed metrics and raw data, please refer to the Excel report and training logs.</p>
+                    <p>All images are saved in the plots directory alongside this report.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        

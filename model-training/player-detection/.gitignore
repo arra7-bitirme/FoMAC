@@ -1,5 +1,34 @@
+# Python cache
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Datasets (large files)
 datasets/
 soccerNet/
-modules/__pycache__/
-reports/__pycache__/
-utils/__pycache__/
+snmot_viz/
+
+# Training outputs
+models/*/weights/epoch*.pt
+models/*/weights/last.pt
+runs/
+
+# Reports and plots
+reports/**/plots_*/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.cache
+*~
