@@ -18,6 +18,13 @@ Oyuncu, top ve hakem tespiti yapan çok sınıflı model
 - **Status:** 🔄 In development
 - **Performance:** Challenging ball detection due to small size
 
+### 🛰️ [Tracking & ReID](./tracking/)
+SoccerNet ReID + SNMOT tracking entegrasyonu
+- **Detector:** `models/player_ball_detector/weights/best.pt`
+- **ReID:** ResNet50 (SoccerNet fine-tune)
+- **Tracker:** StrongSORT/ByteTrack (Ultralytics)
+- **Çıktı:** MOTChallenge formatında track dosyaları
+
 ## 🚀 Hızlı Başlangıç
 
 ```bash
@@ -192,6 +199,11 @@ model-training/
 │   ├── ballDataset/         # Dataset (gitignored)
 │   ├── yolo/               # Source code
 │   └── models/             # Output models  
+├── tracking/               # ReID + MOT pipeline
+│   ├── configs/
+│   ├── modules/
+│   ├── run_tracking.py
+│   └── train_reid.py
 └── yolo/                    # Shared YOLO utilities
 ```
 
@@ -206,4 +218,5 @@ model-training/
 
 - [Player Detection README](./player-detection/README.md)
 - [Ball Detection README](./ball-detection/README.md)
+- [Tracking & ReID README](./tracking/README.md)
 - [YOLO Configuration Guide](./ball-detection/yolo/README.md)
