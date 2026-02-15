@@ -1,0 +1,75 @@
+# YOLO Model Configuration
+
+# Model architecture - Using pre-trained player detection model as base
+model: "C:/Users/Admin/Desktop/bitirme/FoMACBitirme/model-training/player-detection/models/football_detector_optimized/weights/best.pt"  # Pre-trained player model
+
+# Input configuration
+imgsz: 1024  # Input image size (increased for better small object detection)
+batch: 12    # Batch size (RTX 5070 can handle larger batches)
+
+# Training epochs and optimization
+epochs: 100  # Number of training epochs for fine-tuning
+pretrained: true  # Use pretrained weights
+optimizer: "AdamW"  # Optimizer type
+
+# Learning rate configuration
+lr0: 0.002      # Initial learning rate
+lrf: 0.01       # Final learning rate factor
+momentum: 0.937  # Momentum
+weight_decay: 0.0005  # Weight decay
+
+# Warmup settings
+warmup_epochs: 4        # Warmup epochs
+warmup_momentum: 0.8    # Warmup momentum
+warmup_bias_lr: 0.1     # Warmup bias learning rate
+
+# Loss weights
+box: 7.5   # Box loss weight
+cls: 0.4   # Class loss weight
+dfl: 2.0   # Distribution focal loss weight
+
+# Data augmentation
+hsv_h: 0.02        # Hue augmentation
+hsv_s: 0.5         # Saturation augmentation
+hsv_v: 0.4         # Value augmentation
+degrees: 3.0       # Rotation degrees
+translate: 0.1     # Translation factor
+scale: 0.5         # Scale factor
+shear: 0.0         # Shear degrees
+perspective: 0.0   # Perspective factor
+flipud: 0.0        # Vertical flip probability
+fliplr: 0.5        # Horizontal flip probability
+
+# Advanced augmentation
+mosaic: 0.8         # Mosaic augmentation probability
+mixup: 0.05         # Mixup augmentation probability
+copy_paste: 0.1     # Copy-paste augmentation probability
+
+# Training settings
+patience: 20        # Early stopping patience (reduced for faster iteration)
+save_period: 3      # Model save period (more frequent saves)
+cache: false         # Cache images in RAM (RTX 5070 systems usually have good RAM)
+rect: false         # Rectangular training
+cos_lr: true        # Cosine learning rate scheduler
+close_mosaic: 10    # Close mosaic in last N epochs (reduced)
+multi_scale: true   # Multi-scale training
+dropout: 0.1        # Dropout rate
+
+# Validation settings
+val: true     # Validate during training
+conf: 0.01    # Confidence threshold
+iou: 0.65     # IoU threshold
+max_det: 1000 # Maximum detections
+
+# Performance settings
+workers: 8     # Number of dataloader workers (RTX 5070 + modern CPU)
+profile: false  # Profile training
+fraction: 1.0   # Dataset fraction to use
+
+# Mixed precision training for RTX 5070
+amp: true       # Automatic Mixed Precision for faster training
+
+# Project settings
+project_name: "player_ball_detector"
+exist_ok: true
+save: true
