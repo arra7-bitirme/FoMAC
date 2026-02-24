@@ -1,322 +1,389 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Video, ListVideo, Loader2, AlertTriangle } from "lucide-react";
+import { Loader2, Upload } from "lucide-react";
+
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 interface VideoFile {
   path: string;
   name: string;
-  uploaded?: boolean;
-  video_id?: number;
-  normal_url?: string;
-  debug_url?: string;
-  debug_path?: string;
-  debug_json_url?: string;
+  url?: string;
+  kind?: string;
 }
 
 export function VideoSelector() {
-  const [libraryVideos, setLibraryVideos] = useState<VideoFile[]>([]);
-  const [uploadsVideos, setUploadsVideos] = useState<VideoFile[]>([]);
-  const [filteredVideos, setFilteredVideos] = useState<VideoFile[]>([]);
-  const [activeTab, setActiveTab] = useState<'library'|'uploads'>('library');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
   const selectVideo = useAppStore((state) => state.selectVideo);
-  const addFrameData = useAppStore((state) => state.addFrameData);
-  const clearFrameData = useAppStore((state) => state.clearFrameData);
-  const [extracting, setExtracting] = useState<string | null>(null);
-  const [promptVideo, setPromptVideo] = useState<VideoFile | null>(null);
-  const [promptMinutes, setPromptMinutes] = useState<string>("0.5");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
+  const [minutes, setMinutes] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [processedVideos, setProcessedVideos] = useState<VideoFile[]>([]);
+  const [listError, setListError] = useState<string | null>(null);
+
+  async function refreshProcessedVideos() {
+    try {
+      setListError(null);
+      const resp = await fetch(`${BACKEND_URL}/api/uploads`, { cache: "no-store" });
+      if (!resp.ok) throw new Error(await resp.text());
+      const data = (await resp.json()) as VideoFile[];
+      setProcessedVideos(Array.isArray(data) ? data : []);
+    } catch (e: any) {
+      setListError(e?.message || String(e));
+    }
+  }
 
   useEffect(() => {
-    async function fetchVideos() {
-      try {
-        setLoading(true);
-        setError(null);
-        const [videosResp, uploadsResp] = await Promise.all([
-          fetch("http://localhost:8000/api/videos"),
-          fetch("http://localhost:8000/api/uploads"),
-        ]);
-        if (!videosResp.ok) throw new Error(`Failed to fetch videos: ${videosResp.statusText}`);
-        if (!uploadsResp.ok) throw new Error(`Failed to fetch uploads: ${uploadsResp.statusText}`);
-        const videosData = await videosResp.json();
-        const uploadsData = await uploadsResp.json();
-        // uploadsData sadece upload edilenler, ana listede gösterilmeyecek
-        // Normalize items (backend should return {path,name} but handle raw string paths too)
-        function normalize(item: any): VideoFile {
-          if (!item) return { path: String(item), name: String(item) };
-          if (typeof item === "string") {
-            const p = item;
-            return { path: p, name: p.split("/").pop() || p };
-          }
-          const p = item.path || String(item);
-          const name = item.name || p.split("/").pop() || p;
-          const v: VideoFile = { path: p, name };
-          if (item.video_id) v.video_id = item.video_id;
-          if (item.normal_url) v.normal_url = item.normal_url;
-          if (item.debug_url) v.debug_url = item.debug_url;
-          if (item.debug_path) v.debug_path = item.debug_path;
-          return v;
-        }
-        const mainList = videosData.map(normalize);
-        const uploadsList = (uploadsData || []).map(normalize).map((v) => ({ ...v, uploaded: true }));
-        setLibraryVideos(mainList);
-        setUploadsVideos(uploadsList);
-        setFilteredVideos(activeTab === 'library' ? mainList : uploadsList);
-      } catch (e: any) {
-        setError(e.message || "An unknown error occurred while fetching videos.");
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchVideos();
+    refreshProcessedVideos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    const lowercasedFilter = searchTerm.toLowerCase();
-    const source = activeTab === 'library' ? libraryVideos : uploadsVideos;
-    const filtered = source.filter((video) => video.name.toLowerCase().includes(lowercasedFilter));
-    setFilteredVideos(filtered);
-  }, [searchTerm, libraryVideos, uploadsVideos, activeTab]);
+  function isLikelyVideoFile(f: File): boolean {
+    const name = (f?.name || "").toLowerCase();
+    const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+    if (f?.type && f.type.startsWith("video/")) return true;
+    return [".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"].includes(ext);
+  }
 
-  const handleSelectVideo = (video: VideoFile) => {
-    // If this is an uploaded/processed clip, open it directly for playback
-    if (video.uploaded) {
-      const normal = video.normal_url || `http://localhost:8000/api/video?path=${encodeURIComponent(video.path)}`;
-      const debug = video.debug_url || normal;
-      selectVideo({ normalUrl: normal, debugUrl: debug, path: video.path, name: video.name });
-      // Load associated debug JSON if present
-      if (video.debug_json_url) {
-        clearFrameData();
-        fetch(video.debug_json_url)
-          .then((r) => r.ok ? r.json() : Promise.reject(r.statusText))
-          .then((arr) => {
-            if (Array.isArray(arr)) {
-              arr.forEach((f: any) => addFrameData(f));
-            }
-          })
-          .catch((e) => console.warn("Failed to load debug JSON:", e));
-      }
+  function pickFile() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFile(f: File | null) {
+    if (!f) {
+      setSelectedFile(null);
       return;
     }
-    // Otherwise open inline prompt to ask minutes for extraction/process
-    setPromptMinutes("0.5");
-    setPromptVideo(video);
+    if (!isLikelyVideoFile(f)) {
+      setStatusMessage("Lütfen bir video dosyası seçin (.mkv dahil).");
+      return;
+    }
+    setSelectedFile(f);
     setStatusMessage(null);
-  };
+  }
 
-  async function extractClipFromVideo(video: VideoFile, minutes: number) {
-    setExtracting(video.path);
-    setStatusMessage("Videonuz oluşturuluyor ve yükleniyor...");
+  useEffect(() => {
+    if (!selectedFile) {
+      if (localPreviewUrl) URL.revokeObjectURL(localPreviewUrl);
+      setLocalPreviewUrl(null);
+      return;
+    }
+    const nextUrl = URL.createObjectURL(selectedFile);
+    setLocalPreviewUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return nextUrl;
+    });
+    return () => {
+      try {
+        URL.revokeObjectURL(nextUrl);
+      } catch {
+        // ignore
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFile]);
+
+  async function uploadAndRunPipeline() {
+    if (!selectedFile) {
+      setStatusMessage("Lütfen bir video dosyası seçin.");
+      return;
+    }
+
+    setBusy(true);
+    setStatusMessage("Video yükleniyor...");
+
     try {
-      const resp = await fetch("http://localhost:8000/api/process_video", {
+      const fd = new FormData();
+      fd.append("file", selectedFile);
+
+      const uploadResp = await fetch(`${BACKEND_URL}/api/upload_video`, {
+        method: "POST",
+        body: fd,
+      });
+      if (!uploadResp.ok) {
+        throw new Error(await uploadResp.text());
+      }
+      const uploadData = await uploadResp.json();
+      const uploadedPath = uploadData.path as string;
+
+      setStatusMessage("Pipeline çalışıyor (tracking + action spotting)...");
+
+      const minVal = minutes.trim() === "" ? null : parseFloat(minutes);
+      const payload: any = {
+        path: uploadedPath,
+        start_seconds: 0.0,
+        run_tracking: true,
+        run_action_spotting: true,
+      };
+      if (minVal !== null && !isNaN(minVal) && minVal > 0) {
+        payload.minutes = minVal;
+      }
+
+      const runResp = await fetch(`${BACKEND_URL}/api/run_full_pipeline_async`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: video.path, minutes }),
+        body: JSON.stringify(payload),
       });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || "Processing failed");
+      if (!runResp.ok) {
+        throw new Error(await runResp.text());
       }
-      const data = await resp.json();
-      // select both normal and debug video URLs
-      const newUpload: VideoFile = {
-        path: data.normal_path,
-        name: data.normal_path.split('/').pop() || video.name,
-        uploaded: true,
-        video_id: data.video_id,
-        normal_url: data.normal_url,
-        debug_url: data.debug_url,
-        debug_path: data.debug_path,
-      };
-      setUploadsVideos((s) => [newUpload, ...s]);
-      selectVideo({ normalUrl: data.normal_url, debugUrl: data.debug_url, path: data.normal_path, name: newUpload.name });
-      setStatusMessage("Videonuz ve debug videosu hazır.");
-      setTimeout(() => setPromptVideo(null), 800);
+      const runData = await runResp.json();
+      const jobId = runData.job_id as string;
+
+      setStatusMessage(`Pipeline başladı. Job: ${jobId}`);
+
+      await new Promise<void>((resolve, reject) => {
+        const es = new EventSource(`${BACKEND_URL}/api/pipeline_progress?job_id=${encodeURIComponent(jobId)}`);
+
+        const cleanup = () => {
+          try { es.close(); } catch {}
+        };
+
+        es.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+
+            if (data?.type === "result" && data?.result) {
+              const overlayUrl = data.result.overlay_video_url as string;
+              const overlayPath = data.result.overlay_video_path as string;
+              selectVideo({
+                normalUrl: overlayUrl,
+                debugUrl: overlayUrl,
+                path: overlayPath || uploadedPath,
+                name: (overlayPath || "overlay.mp4").split("/").pop() || "overlay.mp4",
+              });
+              setStatusMessage("Tamamlandı.");
+              refreshProcessedVideos();
+              cleanup();
+              resolve();
+              return;
+            }
+
+            if (data?.type === "error") {
+              setStatusMessage(`Hata: ${data?.error || "Bilinmeyen hata"}`);
+              cleanup();
+              reject(new Error(data?.error || "pipeline error"));
+              return;
+            }
+
+            if (data?.status) {
+              const cur = Number(data.current || 0);
+              const total = Number(data.total || 0);
+              const pct = total > 0 ? Math.floor((cur * 100) / total) : null;
+              const msg = String(data.message || "");
+              const stage = String(data.stage || data.status);
+              setStatusMessage(pct !== null ? `[${stage}] ${pct}%  ${msg}` : `[${stage}] ${msg}`);
+            }
+          } catch (e) {
+            // ignore parse errors
+          }
+        };
+
+        es.onerror = () => {
+          setStatusMessage("Progress bağlantısı koptu.");
+          cleanup();
+          reject(new Error("SSE error"));
+        };
+      });
     } catch (e: any) {
       console.error(e);
-      setStatusMessage("Processing failed: " + (e.message || e));
+      setStatusMessage(`İşlem başarısız: ${e?.message || e}`);
     } finally {
-      setExtracting(null);
+      setBusy(false);
     }
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-3">
+      <Card className="h-fit">
+        <CardHeader>
+          <CardTitle className="text-base">Overlay Videoları</CardTitle>
+          <CardDescription>Mevcut overlay çıktıları</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-medium">Liste</div>
+            <Button type="button" variant="secondary" size="sm" onClick={refreshProcessedVideos} disabled={busy}>
+              Yenile
+            </Button>
+          </div>
+
+          {listError ? (
+            <div className="text-sm text-destructive">Liste okunamadı: {listError}</div>
+          ) : processedVideos.filter((v) => (v.kind || "").toLowerCase() === "overlay" || v.name.toLowerCase().startsWith("overlay_")).length === 0 ? (
+            <div className="text-sm text-muted-foreground">Henüz overlay video yok.</div>
+          ) : (
+            <div className="grid grid-cols-1 gap-2">
+              {processedVideos
+                .filter((v) => (v.kind || "").toLowerCase() === "overlay" || v.name.toLowerCase().startsWith("overlay_"))
+                .slice()
+                .reverse()
+                .map((v) => (
+                  <div key={v.path} className="flex items-center justify-between gap-2 rounded-md border p-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium truncate">{v.name}</div>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => {
+                        const url = v.url || `${BACKEND_URL}/api/video?path=${encodeURIComponent(v.path)}`;
+                        selectVideo({
+                          normalUrl: url,
+                          debugUrl: url,
+                          path: v.path,
+                          name: v.name,
+                        });
+                        setStatusMessage("Overlay seçildi.");
+                      }}
+                    >
+                      Oynat
+                    </Button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader className="text-center">
-          <CardTitle className="text-3xl mb-2">Select a Match Video</CardTitle>
-          <CardDescription className="text-lg">
-            Choose a video from the list below to start processing.
-          </CardDescription>
+          <CardTitle className="text-3xl mb-2">Video Yükle</CardTitle>
+          <CardDescription className="text-lg">Herhangi bir videoyu yükle, pipeline çalışsın ve çıktı videoyu izle.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <div className="relative">
-            <Input
-              placeholder="Search videos..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-8"
-            />
-            <ListVideo className="absolute left-2 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-          </div>
+          <div className="flex flex-col gap-2">
+            <div className="text-sm font-medium">Video Alanı (1920×1080)</div>
 
-          <div className="flex gap-2">
-            <Button
-              variant={activeTab === 'library' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('library')}
-            >
-              Kütüphane
-            </Button>
-            <Button
-              variant={activeTab === 'uploads' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('uploads')}
-            >
-              Yüklemeler
-            </Button>
-          </div>
-
-          <ScrollArea className="h-72 w-full rounded-md border">
-            <div className="p-4">
-              {loading ? (
-                <div className="flex items-center justify-center h-full">
-                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                  <p className="ml-2">Loading videos...</p>
-                </div>
-              ) : error ? (
-                <div className="flex flex-col items-center justify-center h-full text-destructive">
-                  <AlertTriangle className="h-8 w-8 mb-2" />
-                  <p className="font-semibold">Error loading videos</p>
-                  <p className="text-sm text-center">{error}</p>
-                </div>
-              ) : filteredVideos.length > 0 ? (
-                <ul className="space-y-2">
-                  {filteredVideos.map((video) => (
-                    <li key={video.path}>
-                      <Button
-                        variant="ghost"
-                        className="w-full justify-start text-left h-auto"
-                        onClick={() => handleSelectVideo(video)}
-                      >
-                        <div className="mr-2 flex-shrink-0 h-8 w-12 overflow-hidden rounded-sm bg-black">
-                          <img
-                            src={`http://localhost:8000/api/thumbnail?path=${encodeURIComponent(video.path)}`}
-                            alt="thumb"
-                            className="h-full w-full object-cover"
-                            onError={(e) => {
-                              (e.target as HTMLImageElement).src = "/fallback-thumb.png";
-                            }}
-                          />
-                        </div>
-                        <span className="truncate">{video.name}</span>
-                        {extracting === video.path ? (
-                          <Loader2 className="h-4 w-4 ml-2 animate-spin text-muted-foreground" />
-                        ) : null}
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-center text-muted-foreground py-10">
-                  <p>No videos found.</p>
-                </div>
-              )}
-            </div>
-          </ScrollArea>
-
-          {promptVideo ? (
-            <div className="fixed inset-0 z-50 flex items-center justify-center">
-              <div className="absolute inset-0 bg-black/40" onClick={() => setPromptVideo(null)} />
-              <div className="relative z-10 w-full max-w-md">
-                <div className="bg-white dark:bg-slate-900 rounded-lg shadow-lg p-4">
-                  <h3 className="text-lg font-semibold mb-2">Kaç dakika olacak?</h3>
-                  <p className="text-sm text-muted-foreground mb-3 truncate">{promptVideo.name}</p>
-                  <div className="flex items-center gap-2 mb-3">
-                    <Input
-                      value={promptMinutes}
-                      onChange={(e) => setPromptMinutes(e.target.value)}
-                      type="number"
-                      min="0.05"
-                      step="0.1"
-                      className="w-32"
+            <div className="w-full rounded-md border overflow-hidden">
+              <div
+                className={`w-full aspect-video relative ${dragActive ? "bg-muted/60" : "bg-muted/30"}`}
+                onDragEnterCapture={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragActive(true);
+                }}
+                onDragOverCapture={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragActive(true);
+                  try {
+                    e.dataTransfer.dropEffect = "copy";
+                  } catch {
+                    // ignore
+                  }
+                }}
+                onDragLeaveCapture={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragActive(false);
+                }}
+                onDropCapture={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setDragActive(false);
+                  const f = e.dataTransfer?.files?.[0] || null;
+                  handleFile(f);
+                }}
+                onClick={() => {
+                  // Only auto-open picker when empty; when preview exists,
+                  // clicking should not break video controls.
+                  if (!localPreviewUrl) pickFile();
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (!localPreviewUrl && (e.key === "Enter" || e.key === " ")) pickFile();
+                }}
+              >
+                {localPreviewUrl ? (
+                  <>
+                    <video
+                      src={localPreviewUrl}
+                      controls
+                      className="absolute inset-0 w-full h-full object-contain bg-black"
                     />
-                    <span className="text-sm">dakika</span>
+                    <div className="absolute top-3 left-3 z-10">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        className="bg-black/50 hover:bg-black/70 text-white"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          pickFile();
+                        }}
+                      >
+                        Değiştir
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6">
+                    <Upload className="h-8 w-8 text-muted-foreground" />
+                    <div className="mt-3 text-sm text-muted-foreground">
+                      Videoyu buraya sürükle-bırak veya tıkla. (.mkv dahil)
+                    </div>
                   </div>
-                  {statusMessage ? (
-                    <div className="mb-3 text-sm">{statusMessage}</div>
-                  ) : null}
-                  <div className="flex gap-2 justify-end">
-                    <Button
-                      variant="secondary"
-                      onClick={async () => {
-                        // process the full video (not just play)
-                        setExtracting(promptVideo.path);
-                        setStatusMessage("Tüm video işleniyor...");
-                        try {
-                          const resp = await fetch("http://localhost:8000/api/process_video", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ path: promptVideo.path }),
-                          });
-                          if (!resp.ok) throw new Error(await resp.text());
-                          const data = await resp.json();
-                                              const newUpload: VideoFile = {
-                            path: data.normal_path,
-                            name: data.normal_path.split('/').pop() || promptVideo.name,
-                            uploaded: true,
-                            video_id: data.video_id,
-                            normal_url: data.normal_url,
-                                                debug_url: data.debug_url,
-                                                debug_path: data.debug_path,
-                                                debug_json_url: data.debug_json_url,
-                          };
-                          // add to uploads tab and select for playback
-                          setUploadsVideos((s) => [newUpload, ...s]);
-                          selectVideo({ normalUrl: data.normal_url, debugUrl: data.debug_url, path: data.normal_path, name: newUpload.name });
-                          setStatusMessage("Video işlendi ve oynatılıyor.");
-                        } catch (e: any) {
-                          console.error(e);
-                          setStatusMessage("İşleme başarısız: " + (e.message || e));
-                        } finally {
-                          setExtracting(null);
-                          setPromptVideo(null);
-                        }
-                      }}
-                    >
-                      Tüm videoyu kullan
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        const minutes = parseFloat(promptMinutes || "0");
-                        if (isNaN(minutes) || minutes <= 0) {
-                          setStatusMessage("Lütfen geçerli bir dakika değeri girin.");
-                          return;
-                        }
-                        extractClipFromVideo(promptVideo, minutes);
-                      }}
-                    >
-                      {extracting === promptVideo.path ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Oluşturuluyor...
-                        </>
-                      ) : (
-                        "Kırp ve Yükle"
-                      )}
-                    </Button>
-                  </div>
-                </div>
+                )}
               </div>
             </div>
-          ) : null}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="video/*,.mkv"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                handleFile(f);
+              }}
+            />
+
+            <div className="text-xs text-muted-foreground">Yükleme sonrası video otomatik pipeline’a girer.</div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium">Dakika (opsiyonel)</div>
+            <Input
+              value={minutes}
+              onChange={(e) => setMinutes(e.target.value)}
+              type="number"
+              min="0.05"
+              step="0.1"
+              placeholder="0.5"
+              className="w-32"
+              disabled={busy}
+            />
+            <div className="text-xs text-muted-foreground">Boş bırakırsan tüm video.</div>
+          </div>
+
+          {statusMessage ? <div className="text-sm">{statusMessage}</div> : null}
+
+          <div className="flex justify-end">
+            <Button onClick={uploadAndRunPipeline} disabled={busy || !selectedFile}>
+              {busy ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  İşleniyor...
+                </>
+              ) : (
+                <>
+                  <Upload className="h-4 w-4 mr-2" />
+                  Yükle ve İşle
+                </>
+              )}
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>

@@ -25,9 +25,9 @@ second_stage_iou: true
 iou_gate_second: 0.15
 new_track_min_conf: 0.5
 
-reid_batch_size: 224
+reid_batch_size: 448
 reid_fp16: true
-reid_every_n: 1
+reid_every_n: 3
 reid_min_conf: 0.25
 reid_topk: 60
 
@@ -63,7 +63,7 @@ osnet:
   update_policy:
     min_sim_for_update: 0.55
 
-progress_every_sec: 5.0
+progress_every_sec: 1.0
 
 referee_team_id: 2
 
@@ -126,4 +126,4 @@ postprocess:
   merge_max_gap_frames: 300
 
 seed: 0
-max_frames: 2000
+max_frames: 0

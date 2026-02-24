@@ -13,6 +13,13 @@
 /.next/
 /out/
 
+# next.js (nested app)
+/frontend/.next/
+/frontend/out/
+
+# local dev artifacts
+/frontend/frontend.pid
+
 # production
 /build
 

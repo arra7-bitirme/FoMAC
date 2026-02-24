@@ -14,15 +14,75 @@ elif cfg.MODEL_TYPE == "cnn":
 else:
     raise ValueError(f"Unknown MODEL_TYPE: {cfg.MODEL_TYPE}")
 
+
+def _extract_state_dict(checkpoint):
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        return checkpoint["model_state_dict"]
+    if isinstance(checkpoint, dict) and all(isinstance(k, str) for k in checkpoint.keys()):
+        # raw state_dict kaydedilmiş olabilir
+        return checkpoint
+    raise RuntimeError("Checkpoint formatı beklenenden farklı (state_dict bulunamadı).")
+
+
+def _infer_cnn_hparams_from_state_dict(state_dict):
+    # DataParallel vb. prefix'leri için toleranslı arama
+    def _find_key(suffix: str):
+        if suffix in state_dict:
+            return suffix
+        for k in state_dict.keys():
+            if isinstance(k, str) and k.endswith(suffix):
+                return k
+        return None
+
+    k_key = _find_key("netvlad_past.cluster_weights")
+    if not k_key:
+        raise RuntimeError("Checkpoint CNNActionSpotter/NetVLAD anahtarlarını içermiyor.")
+    k_clusters = int(state_dict[k_key].shape[0])
+
+    proj_key = _find_key("input_proj.0.weight")
+    if not proj_key:
+        raise RuntimeError("Checkpoint input_proj ağırlıklarını içermiyor.")
+    proj_dim = int(state_dict[proj_key].shape[0])
+    feature_dim = int(state_dict[proj_key].shape[1])
+
+    return {"k_clusters": k_clusters, "proj_dim": proj_dim, "feature_dim": feature_dim}
+
 def load_model(checkpoint_path):
     print(f"📥 Model yükleniyor: {checkpoint_path}")
-    model = CurrentModel().to(cfg.DEVICE)
-    
+
     checkpoint = torch.load(checkpoint_path, map_location=cfg.DEVICE)
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+    state_dict = _extract_state_dict(checkpoint)
+
+    # Not: Model mimarisi config'ten okunuyor; ama config değişmişse checkpoint yüklenmez.
+    # Bu yüzden CNN için gerekli hparam'ları checkpoint'ten okuyup cfg'yi override ediyoruz.
+    if cfg.MODEL_TYPE == "cnn":
+        inferred = _infer_cnn_hparams_from_state_dict(state_dict)
+
+        if cfg.NETVLAD_CLUSTERS != inferred["k_clusters"]:
+            print(
+                f"⚠️  NETVLAD_CLUSTERS config={cfg.NETVLAD_CLUSTERS} ama checkpoint={inferred['k_clusters']}. "
+                "Checkpoint değerine göre override ediyorum."
+            )
+        if cfg.PROJECTION_DIM != inferred["proj_dim"]:
+            print(
+                f"⚠️  PROJECTION_DIM config={cfg.PROJECTION_DIM} ama checkpoint={inferred['proj_dim']}. "
+                "Checkpoint değerine göre override ediyorum."
+            )
+        if cfg.FEATURE_DIM != inferred["feature_dim"]:
+            print(
+                f"⚠️  FEATURE_DIM config={cfg.FEATURE_DIM} ama checkpoint={inferred['feature_dim']}. "
+                "Checkpoint değerine göre override ediyorum."
+            )
+
+        cfg.NETVLAD_CLUSTERS = inferred["k_clusters"]
+        cfg.PROJECTION_DIM = inferred["proj_dim"]
+        cfg.FEATURE_DIM = inferred["feature_dim"]
+
+        model = CurrentModel().to(cfg.DEVICE)
+        model.load_state_dict(state_dict)
     else:
-        model.load_state_dict(checkpoint)
+        model = CurrentModel().to(cfg.DEVICE)
+        model.load_state_dict(state_dict)
         
     model.eval()
     return model

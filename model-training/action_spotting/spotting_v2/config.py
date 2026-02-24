@@ -59,7 +59,7 @@ MODEL_TYPE = "cnn"
 
 # CNN / NetVLAD Ayarları
 PROJECTION_DIM = 512       # 8576 -> 512 Reduction
-NETVLAD_CLUSTERS = 48      # K=16 (4GB VRAM için güvenli, PDF önerisi: 64)
+NETVLAD_CLUSTERS = 16      # Checkpoint ile uyumlu varsayılan (NetVLAD++ K)
 NETVLAD_GHOST_CLUSTERS = 0 # İleri seviye
 
 # ==============================================================================

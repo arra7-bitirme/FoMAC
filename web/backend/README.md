@@ -24,8 +24,34 @@ Kurulum
 Çalıştırma
 - Hazır betik ile (izin verildiyse):
 
-  chmod +x run.sh
-  ./run.sh
+   chmod +x run.sh
+   ./run.sh start
+
+   Durum/log:
+   ./run.sh status
+   ./run.sh logs
+   ./run.sh follow
+   ./run.sh stop
+
+- Config dosyası ile (önerilen):
+
+   ```bash
+   # örnek config: run.env.example
+   ./run.sh start --config ./run.env.example
+   ```
+
+   Not: config dosyası `KEY=VALUE` formatında bir env dosyasıdır.
+   En sık kullanılanlar: `FOMAC_CONDA_ENV`, `FOMAC_YOLO_MODEL_PATH`, `FOMAC_VIDEO_DIR`.
+
+- Windows (PowerShell) ile:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\run.ps1 start  -Config .\run.env.example
+   powershell -ExecutionPolicy Bypass -File .\run.ps1 status -Config .\run.env.example
+   powershell -ExecutionPolicy Bypass -File .\run.ps1 logs   -Config .\run.env.example
+   powershell -ExecutionPolicy Bypass -File .\run.ps1 follow -Config .\run.env.example
+   powershell -ExecutionPolicy Bypass -File .\run.ps1 stop   -Config .\run.env.example
+   ```
 
 - Alternatif olarak doğrudan Python ile:
 
