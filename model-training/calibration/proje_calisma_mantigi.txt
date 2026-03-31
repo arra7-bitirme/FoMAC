@@ -1,0 +1,51 @@
+# Proje Çalışma Mantığı: Futbol Sahası Minimap ve Kamera Kalibrasyonu
+
+Bu proje temel olarak bir futbol maçındaki yayın görüntüsünü (kamera karelerini) analiz eder. Karelerdeki sahanın çizgilerini, önemli noktalarını (korner, ceza sahası köşesi vb.), oyuncuları ve topu tespit eder. Daha sonra kameranın gerçek dünyadaki açısını ve konumunu (kalibrasyon) hesaplayıp, tespit ettiği insanları/topu kuş bakışı (minimap) bir 2D saha üzerinde gösterir.
+
+Proje adım adım şu şekilde çalışıyor:
+
+### Adım 1: Modellerin Yüklenmesi (Yapay Zeka Hazırlığı)
+Program (`demo.py`) çalışmaya başladığında üç ana yapay zeka modelini yükler:
+1. **YOLO (You Only Look Once):** Görüntüdeki nesneleri bulmak için kullanılır. Bizim projemizde insanları (oyuncular/hakem) ve spor topunu tespit etmek için `yolo11n.pt` modeli yüklenir.
+2. **HRNet (Keypoint - SV_kp.pth):** Sahanın önemli noktalarını (kalelerin alt köşeleri, orta yuvarlak merkezi vb.) bulmak için geliştirilmiş özel bir modeldir.
+3. **HRNet (Lines - SV_lines.pth):** Sahanın çizgilerini (taç çizgisi, ceza sahası çizgisi vb.) tespit etmek için kullanılır.
+*Eğer HRNet modelleri (SV_kp ve SV_lines) bilgisayarda yoksa öncelikle internetten otomatik olarak indirilir.*
+
+### Adım 2: Görüntülerin Okunması
+Sistem `data` klasörüne bakar. Algoritma, videonun karelerine ayrılmış haldeki `.jpg` veya `.png` resimlerini sırayla okur.
+
+### Adım 3: Oyuncu ve Top Tespiti (YOLO ile)
+Her bir kare okunduğunda öncelikle YOLO modeline verilir.
+* Görüntüdeki herkes (oyuncu, hakem, vs) tespit edilir ve kapladıkları alanın kutu (bounding box) koordinatları alınır (COCO Sınıf No 0).
+* Top varsa topun koordinatları da aynı şekilde saklanır (COCO Sınıf No 32).
+
+### Adım 4: Saha Noktaları ve Çizgilerinin Tespiti (HRNet ile)
+Kare, HRNet modellerine (Keypoints ve Lines) gönderilir. Proje özel olarak 960x540 çözünürlüğünde çalışacak şekilde eğitildiği için resim bu boyuta küçültülerek (resize) modele verilir.
+* Model `heatmap` (ısı haritası) adı verilen pikseller çıkarır.
+* Bu pikseller üzerinde eşik değeri (0.05) uygulanarak noktalara/çizgilere dönüştürülür. Ekranda kaç tane anlamlı nokta/çizgi bulunduğu hesaplanır.
+
+### Adım 5: Kamera Kalibrasyonunun Hesaplanması
+Tespit edilen saha noktaları sayesinde gerçek bir futbol sahasının boyutlarıyla (105x68 metre) kameradaki noktalar eşleştirilir. `FramebyFrameCalib` sınıfı şunları hesaplar:
+* Kameranın pan (sağa/sola dönüş), tilt (aşağı/yukarı eğim), roll (kendi ekseninde rotasyon) açıları.
+* Odak uzaklığı (Focal length).
+* Kameranın sahadaki X, Y, Z uzaysal koordinatları.
+Bu işlem "Heuristic Voting" (Sezgisel Oylama) kullanılarak en az hataya sahip konum seçilerek yapılır.
+
+### Adım 6: Orijinal Görüntü Üzerine Çizim
+Eğer kalibrasyon başarılıysa:
+* `Camera` modeli oluşturulur ve `demo.py` orijinal fotoğrafın üzerine sahanın kalibre edilmiş (gerçek dünyadırıp eşleştirilmiş) çizgilerini çizer.
+
+### Adım 7: Minimap'in Oluşturulması (`draw_minimap` fonksiyonu)
+Burada yeşil bir "kuş bakışı" harita (minimap) oluşturulur:
+1. **Saha Çizimi:** Standart futbol sahası ölçülerine (105m x 68m) göre beyaz çizgiler ve köşe gönderleri çizilir.
+2. **Kamera Pozisyonu:** Kırmızı bir nokta ile kameranın o anki tahmini konumu minimap'e yerleştirilir. Ayrıca kameranın görüş açısı (FOV - Field of View) sarı çizgilerle çizilir.
+3. **Oyuncuların İzdüşümü:** 3. Adımda YOLO ile bulunan "oyuncu dikdörtgenlerinin" tam alt, orta noktası (ayaklarının bastığı yer) alınır. Kameranın kalibrasyon bilgisiyle (Homography/Unprojection kullanarak) bu noktanın sahadaki hangi "metreye" (X, Z=0) denk geldiği matematiksel olarak hesaplanır. Sahaya denk giren oyuncular mavi noktalar (beyaz vişne çerçeveli) olarak haritaya işlenir.
+4. **Topun İzdüşümü:** Topun kutusunun orta (hafif altı) denge merkezi alınarak aynı izdüşümle turuncu/sarı nokta olarak minimap'e eklenir.
+
+### Adım 8: Çıktıların Birleştirilmesi ve Kayıt
+* Elde edilen bu yeşil Minimap küçültülerek (orijinal fotoğrafın genişliğinin %25'i kadar) fotoğrafın alt orta kısmına yerleştirilir ve etrafına sınır çizgisi çizilir.
+* Sonuç `output` klasörüne `(dosyaismi)_vis.jpg` adıyla bir görsel olarak kaydedilir.
+* Aynı zamanda bu fotoğraf `fps=25` değeriyle çalışan bir video birleştiriciye `output_video.mp4` dosyasına kare olarak gönderilir (kare kare eklenir).
+
+Bütün resimler bitene kadar Adım 2 ile Adım 8 arasındaki döngü devam eder ve finalde bir mp4 video çıktısı alınmış olur.
+`images_to_video.py` scripti ise `output/` dizinindeki çıkarılmış resimleri sırayla okuyarak sonrasında ayrıca tekrar bir videoya (yine sabit 25 FPS) çevirmek için kullanılan bir araçtır.

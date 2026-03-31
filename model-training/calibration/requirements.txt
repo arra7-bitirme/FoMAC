@@ -1,0 +1,11 @@
+numpy
+opencv-python
+scipy
+torch
+torchvision
+requests
+Pillow
+pyyaml
+pandas
+ultralytics
+boxmot

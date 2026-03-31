@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Models (Large files)
+*.pth
+*.pt
+*.onnx
+
+# Data & Output
+data/
+output/
+output_video/
+
+# VS Code
+.vscode/
