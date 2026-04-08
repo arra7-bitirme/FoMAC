@@ -549,8 +549,11 @@ class RunFullPipelineRequest(BaseModel):
     calibration_kp_weights: Optional[str] = None
     calibration_line_weights: Optional[str] = None
     calibration_conf_thres: float = 0.30
-    calibration_write_frames_jsonl: bool = True
+    calibration_write_frames_jsonl: bool = False
     calibration_frames_stride: int = 1
+    calibration_yolo_frame_window: int = 8
+    calibration_yolo_selection_mode: str = "ball_priority"
+    calibration_interpolation_mode: str = "linear"
 
     # action spotting inputs
     features_path: Optional[str] = None
@@ -625,6 +628,9 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         calibration_conf_thres=float(req.calibration_conf_thres),
         calibration_write_frames_jsonl=bool(req.calibration_write_frames_jsonl),
         calibration_frames_stride=int(req.calibration_frames_stride),
+        calibration_yolo_frame_window=int(req.calibration_yolo_frame_window),
+        calibration_yolo_selection_mode=str(req.calibration_yolo_selection_mode),
+        calibration_interpolation_mode=str(req.calibration_interpolation_mode),
         run_tracking=bool(req.run_tracking),
         tracking_device=req.tracking_device,
         tracking_config_path=req.tracking_config_path,
@@ -780,6 +786,9 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 calibration_conf_thres=float(req.calibration_conf_thres),
                 calibration_write_frames_jsonl=bool(req.calibration_write_frames_jsonl),
                 calibration_frames_stride=int(req.calibration_frames_stride),
+                calibration_yolo_frame_window=int(req.calibration_yolo_frame_window),
+                calibration_yolo_selection_mode=str(req.calibration_yolo_selection_mode),
+                calibration_interpolation_mode=str(req.calibration_interpolation_mode),
                 run_tracking=bool(req.run_tracking),
                 tracking_device=req.tracking_device,
                 tracking_config_path=req.tracking_config_path,

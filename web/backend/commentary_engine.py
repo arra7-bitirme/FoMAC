@@ -5,8 +5,7 @@ Used by the backend pipeline to synthesize timestamped audio commentary clips.
 Goals:
 - Do not crash on import if optional deps are missing.
 - Stable API for pipeline: `synthesize_commentary(text, t_seconds)`.
-- Support lightweight/offline Windows TTS via `pyttsx3`.
-- Optionally support Coqui XTTS v2 if installed.
+- Use Coqui XTTS v2 with a reference speaker WAV when available.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ class CommentaryEngine:
         model_name: str = "models/gemini-2.0-flash-lite",
         *,
         enable_llm: bool = False,
-        tts_backend: str = "pyttsx3",
+        tts_backend: str = "xttsv2",
         speaker_wav: Optional[str] = None,
     ) -> None:
         self.output_dir = Path(output_dir)
@@ -74,14 +73,18 @@ class CommentaryEngine:
         self.language_code = str(language_code or "tr-TR")
         self.model_name = str(model_name or "")
         self.enable_llm = bool(enable_llm)
-        raw_backend = str(tts_backend or "pyttsx3").strip().lower()
+        raw_backend = str(tts_backend or "xttsv2").strip().lower()
         # Accept common aliases
         if raw_backend in ("xttsv2", "xtts_v2", "xtts-v2", "xtts2"):
             raw_backend = "xtts"
-        if raw_backend in ("sapi5", "sapi"):
-            raw_backend = "sapi"
-        self.tts_backend = raw_backend or "pyttsx3"
-        self.speaker_wav = speaker_wav
+        if raw_backend in ("sapi5", "sapi", "pyttsx3"):
+            logger.warning("Unsupported TTS backend '%s'; forcing XTTS v2 with reference speaker WAV", raw_backend)
+            raw_backend = "xtts"
+        self.tts_backend = raw_backend or "xtts"
+
+        current_dir = Path(__file__).resolve().parent
+        default_speaker = current_dir / "ertem_sener.wav"
+        self.speaker_wav = speaker_wav or str(default_speaker)
 
         self.llm_model = None
         self.tts = None
@@ -128,28 +131,6 @@ class CommentaryEngine:
 
     def _initialize_tts(self) -> None:
         """Initialize TTS backend (best-effort)."""
-        if self.tts_backend == "pyttsx3":
-            try:
-                import pyttsx3  # type: ignore
-
-                self.tts_client = pyttsx3.init()
-                logger.info("TTS initialized (pyttsx3)")
-                return
-            except Exception as e:
-                logger.warning("Failed to init pyttsx3: %s", e)
-
-        if self.tts_backend == "sapi":
-            # We don't keep a long-lived COM object by default; we'll create per-call.
-            try:
-                import win32com.client  # type: ignore
-
-                _ = win32com.client.Dispatch("SAPI.SpVoice")
-                logger.info("TTS initialized (SAPI)")
-                self.tts_client = "sapi"
-                return
-            except Exception as e:
-                logger.warning("Failed to init SAPI: %s", e)
-
         if self.tts_backend in ("xtts", "coqui", "coqui_xtts"):
             if TTS is None or torch is None:
                 logger.warning("XTTS requested but Coqui TTS/torch not available")
@@ -249,36 +230,6 @@ class CommentaryEngine:
         except Exception:
             return False
 
-    def _synthesize_audio_sapi(self, *, text: str, audio_path: Path) -> Optional[str]:
-        """Windows-only: synthesize WAV via SAPI5 COM (more reliable than pyttsx3 save_to_file)."""
-        try:
-            import win32com.client  # type: ignore
-
-            voice = win32com.client.Dispatch("SAPI.SpVoice")
-            stream = win32com.client.Dispatch("SAPI.SpFileStream")
-            # 3 == SSFMCreateForWrite
-            stream.Open(str(audio_path), 3, False)
-            voice.AudioOutputStream = stream
-            voice.Speak(str(text))
-            stream.Close()
-        except Exception as e:
-            logger.error("SAPI synthesis failed: %s", e)
-            try:
-                if audio_path.exists():
-                    audio_path.unlink()
-            except Exception:
-                pass
-            return None
-
-        if self._validate_audio_file(audio_path):
-            return str(audio_path)
-        try:
-            if audio_path.exists():
-                audio_path.unlink()
-        except Exception:
-            pass
-        return None
-
     def _create_commentary_prompt(self, match_data: Dict[str, Any]) -> str:
         team_a = match_data.get("team_a", "Team A")
         team_b = match_data.get("team_b", "Team B")
@@ -320,46 +271,18 @@ class CommentaryEngine:
         clip_id = self._unique_clip_id(text=str(text), timestamp=safe_timestamp)
         audio_path = self.output_dir / f"commentary_{clip_id}.wav"
 
-        if self.tts_backend == "pyttsx3" and self.tts_client is not None:
-            try:
-                self.tts_client.save_to_file(str(text), str(audio_path))
-                self.tts_client.runAndWait()
-                # pyttsx3 sometimes produces an empty WAV header on Windows.
-                if self._validate_audio_file(audio_path):
-                    return str(audio_path)
-
-                # Best-effort fallback to SAPI if available.
-                try:
-                    if audio_path.exists():
-                        audio_path.unlink()
-                except Exception:
-                    pass
-                return self._synthesize_audio_sapi(text=str(text), audio_path=audio_path)
-            except Exception as e:
-                logger.error("pyttsx3 synthesis failed: %s", e)
-                try:
-                    if audio_path.exists():
-                        audio_path.unlink()
-                except Exception:
-                    pass
-                return self._synthesize_audio_sapi(text=str(text), audio_path=audio_path)
-
-        if self.tts_backend == "sapi":
-            return self._synthesize_audio_sapi(text=str(text), audio_path=audio_path)
-
         if self.tts_backend in ("xtts", "coqui", "coqui_xtts"):
             if self.tts is None:
                 raise RuntimeError(
                     "XTTS v2 backend requested but not initialized. "
-                    "Install Coqui TTS + torch, or choose tts_backend='sapi'."
+                    "Install Coqui TTS + torch to synthesize with ertem_sener.wav."
                 )
 
-            current_dir = Path(__file__).parent
-            speaker = self.speaker_wav or str(current_dir / "ertem_sener.wav")
+            speaker = str(self.speaker_wav)
             if not os.path.isfile(speaker):
                 raise FileNotFoundError(
                     "XTTS v2 requires a reference speaker WAV. "
-                    "Provide speaker_wav or set COMMENTARY_SPEAKER_WAV env var. "
+                    "Provide speaker_wav or place ertem_sener.wav next to commentary_engine.py. "
                     f"Not found: {speaker}"
                 )
             try:
@@ -454,6 +377,6 @@ class CommentaryEngine:
 
 if __name__ == "__main__":
     # Minimal smoke-test (no LLM)
-    ce = CommentaryEngine(output_dir="_commentary_smoke", enable_llm=False, tts_backend="pyttsx3")
+    ce = CommentaryEngine(output_dir="_commentary_smoke", enable_llm=False, tts_backend="xttsv2")
     r = ce.synthesize_commentary(text="Deneme spiker yorumu", t_seconds=1.23)
     print(r)

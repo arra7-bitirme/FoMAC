@@ -37,6 +37,9 @@ class FullPipelineConfig:
     calibration_conf_thres: float = 0.30
     calibration_write_frames_jsonl: bool = False
     calibration_frames_stride: int = 1
+    calibration_yolo_frame_window: int = 8
+    calibration_yolo_selection_mode: str = "ball_priority"
+    calibration_interpolation_mode: str = "linear"
 
     # tracking
     run_tracking: bool = True
@@ -95,10 +98,8 @@ class FullPipelineConfig:
     commentary_possession_max_age_sec: float = 8.0
     # TTS + audio mixing onto overlay video
     commentary_enable_tts: bool = True
-    # Default to XTTS v2 (Coqui). If unavailable or speaker wav is missing, the audio manifest
-    # will include errors; you can switch to 'sapi' for a lightweight Windows fallback.
-    commentary_tts_backend: str = "xttsv2"  # or: sapi, pyttsx3, xtts/xttsv2
-    commentary_speaker_wav: Optional[str] = None
+    commentary_tts_backend: str = "xttsv2"
+    commentary_speaker_wav: Optional[str] = str(Path(__file__).resolve().parent / "ertem_sener.wav")
 
     # heuristics
     possession_dist_norm: float = 0.08
@@ -161,14 +162,21 @@ def run_calibration_pipeline(
     kp_w = None
     line_w = None
     conf = 0.30
+    yolo_frame_window = 8
+    yolo_selection_mode = "ball_priority"
+    interpolation_mode = "linear"
     if cfg is not None:
         try:
             det_w = getattr(cfg, "calibration_detector_weights", None)
             kp_w = getattr(cfg, "calibration_kp_weights", None)
             line_w = getattr(cfg, "calibration_line_weights", None)
             conf = float(getattr(cfg, "calibration_conf_thres", 0.30) or 0.30)
+            yolo_frame_window = int(getattr(cfg, "calibration_yolo_frame_window", 8) or 8)
+            yolo_selection_mode = str(getattr(cfg, "calibration_yolo_selection_mode", "ball_priority") or "ball_priority")
+            interpolation_mode = str(getattr(cfg, "calibration_interpolation_mode", "linear") or "linear")
         except Exception:
             det_w, kp_w, line_w, conf = None, None, None, 0.30
+            yolo_frame_window, yolo_selection_mode, interpolation_mode = 8, "ball_priority", "linear"
 
     det_w = str(det_w).strip() if det_w else (_default_calibration_detector_weights() or "")
     kp_w = str(kp_w).strip() if kp_w else (_default_calibration_kp_weights() or "")
@@ -180,6 +188,16 @@ def run_calibration_pipeline(
         raise FileNotFoundError(f"calibration kp weights not found: {kp_w}")
     if not line_w or not os.path.isfile(line_w):
         raise FileNotFoundError(f"calibration line weights not found: {line_w}")
+
+    calibration_config = {
+        "detector_weights": str(Path(det_w).resolve()),
+        "kp_weights": str(Path(kp_w).resolve()),
+        "line_weights": str(Path(line_w).resolve()),
+        "conf_thres": float(conf),
+        "yolo_frame_window": int(max(1, int(yolo_frame_window))),
+        "yolo_selection_mode": str(yolo_selection_mode).strip().lower(),
+        "interpolation_mode": str(interpolation_mode).strip().lower(),
+    }
 
     cmd: List[str] = [
         sys.executable,
@@ -199,6 +217,12 @@ def run_calibration_pipeline(
         str(Path(line_w).resolve()),
         "--conf",
         str(float(conf)),
+        "--yolo_frame_window",
+        str(max(1, int(yolo_frame_window))),
+        "--yolo_selection_mode",
+        str(yolo_selection_mode).strip().lower(),
+        "--interpolation_mode",
+        str(interpolation_mode).strip().lower(),
     ]
 
     frames_stride = 1
@@ -210,8 +234,28 @@ def run_calibration_pipeline(
     if frames_stride < 1:
         frames_stride = 1
 
+    calibration_config["frames_stride"] = int(frames_stride)
+    calibration_config["write_frames_jsonl"] = bool(out_frames and str(out_frames).strip())
+
     if out_frames and str(out_frames).strip():
         cmd += ["--out_frames", str(Path(str(out_frames)).resolve()), "--frames_stride", str(int(frames_stride))]
+
+    if progress_cb is not None:
+        try:
+            progress_cb(
+                "calibration",
+                0,
+                1,
+                (
+                    "Calibration config: "
+                    f"window={calibration_config['yolo_frame_window']}, "
+                    f"mode={calibration_config['yolo_selection_mode']}, "
+                    f"interp={calibration_config['interpolation_mode']}, "
+                    f"conf={calibration_config['conf_thres']:.2f}"
+                ),
+            )
+        except Exception:
+            pass
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -279,12 +323,14 @@ def run_calibration_pipeline(
         raise RuntimeError(f"calibration subprocess failed (code {rc}):\n{err[-8000:]}")
 
     if isinstance(last_json, dict):
+        last_json["config"] = calibration_config
         return last_json
 
     # Best-effort fallback: return declared output paths.
     return {
         "map_video_path": str(Path(out_map).resolve()),
         "events_json_path": str(Path(out_events).resolve()),
+        "config": calibration_config,
         **({"frames_jsonl_path": str(Path(str(out_frames)).resolve())} if out_frames and str(out_frames).strip() else {}),
     }
 
@@ -486,12 +532,11 @@ def _mix_commentary_audio_into_video(
     if not clips:
         return None
 
-    # Keep only existing audio files that look non-empty.
+    # Keep only existing audio files.
     kept: List[Tuple[float, str]] = []
     for t, p in clips:
         try:
-            # Empty WAV headers can be ~44-60 bytes; require at least 1KB.
-            if os.path.isfile(p) and os.path.getsize(p) > 1024:
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
                 kept.append((float(t), str(p)))
         except Exception:
             continue
@@ -576,7 +621,7 @@ def _mix_commentary_audio_into_video(
     ]
 
     try:
-        subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         return out_path
     except Exception:
         # Fallback: re-encode video if stream copy fails.
@@ -607,7 +652,7 @@ def _mix_commentary_audio_into_video(
                 "+faststart",
                 out_path,
             ]
-            subprocess.run(cmd2, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+            subprocess.run(cmd2, capture_output=True, text=True, check=True)
             return out_path
         except Exception:
             return None
@@ -1377,7 +1422,7 @@ def extract_segment_to_mp4(*, src_path: str, out_path: str, start_sec: float, du
             "+faststart",
             out_path,
         ]
-        subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
         try:
             pbar.update(1)
             pbar.close()
@@ -2393,7 +2438,7 @@ def overlay_events_on_video(
                 "+faststart",
                 out_path,
             ]
-            subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
             try:
                 os.remove(tmp_path)
             except Exception:
@@ -2428,6 +2473,24 @@ def run_full_pipeline(
     os.makedirs(out_dir, exist_ok=True)
 
     run_id = datetime.utcnow().strftime("%Y%m%d%H%M%S") + f"_{int(time.time()*1000)%100000:05d}"
+    stage_timings_sec: Dict[str, float] = {}
+    runtime_config: Dict[str, Any] = {
+        "start_seconds": float(cfg.start_seconds or 0.0),
+        "duration_seconds": float(cfg.duration_seconds) if cfg.duration_seconds is not None else None,
+        "run_calibration": bool(cfg.run_calibration),
+        "run_tracking": bool(cfg.run_tracking),
+        "run_action_spotting": bool(cfg.run_action_spotting),
+        "run_jersey_number_recognition": bool(cfg.run_jersey_number_recognition),
+        "run_commentary": bool(getattr(cfg, "run_commentary", True)),
+        "calibration": {
+            "conf_thres": float(cfg.calibration_conf_thres),
+            "write_frames_jsonl": bool(cfg.calibration_write_frames_jsonl),
+            "frames_stride": int(cfg.calibration_frames_stride),
+            "yolo_frame_window": int(cfg.calibration_yolo_frame_window),
+            "yolo_selection_mode": str(cfg.calibration_yolo_selection_mode),
+            "interpolation_mode": str(cfg.calibration_interpolation_mode),
+        },
+    }
 
     def emit(stage: str, cur: int, total: int, msg: str) -> None:
         if progress_cb is None:
@@ -2439,21 +2502,25 @@ def run_full_pipeline(
 
     segment_path = str(Path(out_dir) / f"segment_{run_id}.mp4")
     emit("segment", 0, 1, "Video segment hazırlanıyor")
+    stage_start = time.perf_counter()
     extract_segment_to_mp4(
         src_path=video_path,
         out_path=segment_path,
         start_sec=float(cfg.start_seconds or 0.0),
         duration_sec=cfg.duration_seconds,
     )
+    stage_timings_sec["segment"] = round(time.perf_counter() - stage_start, 3)
     emit("segment", 1, 1, "Video segment hazır")
 
     calibration_map_video_path: Optional[str] = None
     calibration_events_json_path: Optional[str] = None
     calibration_frames_jsonl_path: Optional[str] = None
     calibration_events: List[Dict[str, Any]] = []
+    calibration_runtime_config: Optional[Dict[str, Any]] = None
 
     if bool(getattr(cfg, "run_calibration", True)):
         emit("calibration", 0, 1, "Calibration başlıyor")
+        stage_start = time.perf_counter()
         try:
             out_map = str(Path(out_dir) / f"map_{run_id}.mp4")
             out_events = str(Path(out_dir) / f"calibration_events_{run_id}.json")
@@ -2468,6 +2535,7 @@ def run_full_pipeline(
                 cfg=cfg,
                 progress_cb=progress_cb,
             )
+            calibration_runtime_config = calib_res.get("config") if isinstance(calib_res, dict) else None
 
             calibration_map_video_path = str(calib_res.get("map_video_path") or out_map)
             calibration_events_json_path = str(calib_res.get("events_json_path") or out_events)
@@ -2528,6 +2596,7 @@ def run_full_pipeline(
             calibration_events_json_path = None
             calibration_frames_jsonl_path = None
             calibration_events = []
+        stage_timings_sec["calibration"] = round(time.perf_counter() - stage_start, 3)
         emit("calibration", 1, 1, "Calibration tamam")
 
     tracking_video_path: Optional[str] = None
@@ -2537,6 +2606,7 @@ def run_full_pipeline(
 
     if cfg.run_tracking:
         emit("tracking", 0, 1, "Tracking başlıyor")
+        stage_start = time.perf_counter()
         tracking_res = run_tracking_reid_osnet(
             video_path=segment_path,
             out_dir=out_dir,
@@ -2550,6 +2620,7 @@ def run_full_pipeline(
         tracking_video_path = tracking_res["tracking_video_path"]
         tracks_csv_path = tracking_res["tracks_csv_path"]
         tracks_csv_raw_path = tracking_res.get("tracks_csv_raw_path")
+        stage_timings_sec["tracking"] = round(time.perf_counter() - stage_start, 3)
         emit("tracking", 1, 1, "Tracking tamam")
 
     events: List[Dict[str, Any]] = []
@@ -2592,6 +2663,7 @@ def run_full_pipeline(
         # If not produced during tracking (or tracking was skipped), run jersey inference here.
         if bool(cfg.run_jersey_number_recognition) and (not jersey_by_track) and tracks_csv_path and os.path.isfile(tracks_csv_path):
             emit("jersey", 0, 1, "Forma numarası okunuyor")
+            stage_start = time.perf_counter()
             try:
                 jersey_by_track = infer_jersey_numbers_from_tracking(
                     video_path=segment_path,
@@ -2602,6 +2674,7 @@ def run_full_pipeline(
                 )
             except Exception:
                 jersey_by_track = {}
+            stage_timings_sec["jersey"] = round(time.perf_counter() - stage_start, 3)
             emit("jersey", 1, 1, "Forma numarası hazır")
 
             try:
@@ -2612,6 +2685,7 @@ def run_full_pipeline(
     # Action spotting events
     if cfg.run_action_spotting:
         emit("action_spotting", 0, 1, "Action spotting başlıyor")
+        stage_start = time.perf_counter()
         if not cfg.features_path:
             # Auto-extract PCA512 features (SoccerNet sn-spotting style) when not provided.
             # This produces a single .npy with shape (T, 512) at ~2 FPS.
@@ -2638,6 +2712,7 @@ def run_full_pipeline(
                 nms_window_sec=float(cfg.action_nms_window_sec),
             )
         )
+        stage_timings_sec["action_spotting"] = round(time.perf_counter() - stage_start, 3)
         emit("action_spotting", 1, 1, "Action spotting tamam")
 
     # Sort events by time
@@ -2690,6 +2765,7 @@ def run_full_pipeline(
     base_video = segment_path
     final_overlay_path = str(Path(out_dir) / f"overlay_{run_id}.mp4")
     emit("overlay", 0, 1, "Overlay başlıyor")
+    stage_start = time.perf_counter()
     overlay_events_on_video(
         base_video_path=base_video,
         out_path=final_overlay_path,
@@ -2700,11 +2776,13 @@ def run_full_pipeline(
         track_id_remap=track_id_remap,
         progress_cb=progress_cb,
     )
+    stage_timings_sec["overlay"] = round(time.perf_counter() - stage_start, 3)
     emit("overlay", 1, 1, "Overlay tamam")
 
     # Commentary: ask Qwen for commentator lines, then optionally TTS+mix onto the clean segment.
     try:
         if bool(getattr(cfg, "run_commentary", True)):
+            stage_start = time.perf_counter()
             action_events = [e for e in events if str(e.get("source")) == "action_spotting"]
             possession_events = [
                 e
@@ -2822,18 +2900,11 @@ def run_full_pipeline(
                     )
 
                 if bool(getattr(cfg, "commentary_enable_tts", True)):
-                    tts_error: Optional[str] = None
-                    audio_manifest: List[Dict[str, Any]] = []
-                    clips: List[Tuple[float, str]] = []
                     try:
                         from commentary_engine import CommentaryEngine  # type: ignore
 
-                        tts_backend = str(
-                            getattr(cfg, "commentary_tts_backend", None)
-                            or os.getenv("COMMENTARY_TTS_BACKEND")
-                            or "xttsv2"
-                        )
-                        speaker_wav = getattr(cfg, "commentary_speaker_wav", None) or os.getenv("COMMENTARY_SPEAKER_WAV")
+                        tts_backend = str(getattr(cfg, "commentary_tts_backend", "xttsv2") or "xttsv2")
+                        speaker_wav = getattr(cfg, "commentary_speaker_wav", None)
                         ce = CommentaryEngine(
                             output_dir=str(Path(out_dir) / f"commentary_{run_id}"),
                             enable_llm=False,
@@ -2841,22 +2912,18 @@ def run_full_pipeline(
                             speaker_wav=speaker_wav,
                         )
 
+                        audio_manifest: List[Dict[str, Any]] = []
+                        clips: List[Tuple[float, str]] = []
                         for it in items_out:
                             tt = float(it.get("t", 0.0))
                             txt = str(it.get("commentary_text") or "").strip()
                             if not txt:
-                                audio_manifest.append({**it, "audio_path": None, "status": "skipped", "error": "empty_text"})
                                 continue
                             r = ce.synthesize_commentary(text=txt, t_seconds=tt)
                             audio_manifest.append({**it, **r})
                             ap = r.get("audio_path")
                             if ap:
-                                try:
-                                    ap_s = str(ap)
-                                    if os.path.isfile(ap_s) and os.path.getsize(ap_s) > 1024:
-                                        clips.append((tt, ap_s))
-                                except Exception:
-                                    pass
+                                clips.append((tt, str(ap)))
 
                         commentary_audio_manifest_path = str(Path(out_dir) / f"commentary_audio_{run_id}.json")
                         with open(commentary_audio_manifest_path, "w", encoding="utf-8") as f:
@@ -2873,32 +2940,21 @@ def run_full_pipeline(
                                 indent=2,
                             )
 
-                        if clips:
-                            mixed_path = str(Path(out_dir) / f"product_{run_id}_commentary.mp4")
-                            mixed = _mix_commentary_audio_into_video(
-                                base_video_path=segment_path,
-                                out_path=mixed_path,
-                                clips=clips,
-                            )
-                            if mixed:
-                                commentary_video_path = mixed
-                                product_video_path = mixed
-                    except Exception as e:
-                        tts_error = str(e)
-
-                    # If TTS failed hard, append error info into the qwen output JSON for quick debugging.
-                    if tts_error and commentary_output_path:
-                        try:
-                            with open(commentary_output_path, "r", encoding="utf-8") as rf:
-                                cur_out = json.load(rf) or {}
-                            if isinstance(cur_out, dict):
-                                cur_out["tts_error"] = tts_error
-                                with open(commentary_output_path, "w", encoding="utf-8") as wf:
-                                    json.dump(cur_out, wf, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
+                        mixed_path = str(Path(out_dir) / f"product_{run_id}_commentary.mp4")
+                        mixed = _mix_commentary_audio_into_video(
+                            base_video_path=segment_path,
+                            out_path=mixed_path,
+                            clips=clips,
+                        )
+                        if mixed:
+                            commentary_video_path = mixed
+                            product_video_path = mixed
+                    except Exception:
+                        pass
     except Exception:
         pass
+
+    stage_timings_sec["total"] = round(sum(float(v) for v in stage_timings_sec.values()), 3)
 
     events_json_path = str(Path(out_dir) / f"events_{run_id}.json")
     payload = {
@@ -2908,6 +2964,11 @@ def run_full_pipeline(
             "input_video_path": str(Path(video_path).resolve()),
             "segment_video_path": segment_path,
         },
+        "runtime_config": {
+            **runtime_config,
+            **({"resolved_calibration": calibration_runtime_config} if calibration_runtime_config else {}),
+        },
+        "stage_timings_sec": stage_timings_sec,
         "artifacts": {
             "tracking_video_path": tracking_video_path,
             "tracks_csv_path": tracks_csv_path,
@@ -2934,6 +2995,11 @@ def run_full_pipeline(
     return {
         "run_id": run_id,
         "segment_path": segment_path,
+        "stage_timings_sec": stage_timings_sec,
+        "runtime_config": {
+            **runtime_config,
+            **({"resolved_calibration": calibration_runtime_config} if calibration_runtime_config else {}),
+        },
         **({"calibration_map_video_path": calibration_map_video_path} if calibration_map_video_path else {}),
         **({"calibration_events_json_path": calibration_events_json_path} if calibration_events_json_path else {}),
         **({"calibration_frames_jsonl_path": calibration_frames_jsonl_path} if calibration_frames_jsonl_path else {}),

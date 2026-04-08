@@ -211,6 +211,289 @@ def _draw_map_frame(
     return frame, {"players": players_out, "ball": ball_out}
 
 
+def _fuse_meta_frames(
+    meta_frames: List[Dict[str, Any]],
+    *,
+    player_merge_dist_m: float = 1.5,
+    ball_merge_dist_m: float = 2.5,
+) -> Dict[str, Any]:
+    clusters: List[Dict[str, Any]] = []
+
+    for meta in meta_frames:
+        for player in meta.get("players") or []:
+            try:
+                world_xy = np.asarray(player.get("world_xy"), dtype=np.float32)
+                team_id = int(player.get("team_id", -1))
+            except Exception:
+                continue
+
+            matched_cluster = None
+            best_dist = 1e9
+            for cluster in clusters:
+                if int(cluster["team_id"]) != team_id:
+                    continue
+                dist = float(np.linalg.norm(world_xy - cluster["world_xy"]))
+                if dist <= float(player_merge_dist_m) and dist < best_dist:
+                    best_dist = dist
+                    matched_cluster = cluster
+
+            if matched_cluster is None:
+                clusters.append(
+                    {
+                        "team_id": team_id,
+                        "track_id": int(player.get("track_id", -1)),
+                        "world_xy": world_xy,
+                        "bbox_xyxy": np.asarray(player.get("bbox_xyxy") or [0, 0, 0, 0], dtype=np.float32),
+                        "count": 1,
+                    }
+                )
+            else:
+                count = int(matched_cluster["count"]) + 1
+                matched_cluster["world_xy"] = (matched_cluster["world_xy"] * matched_cluster["count"] + world_xy) / float(count)
+                matched_cluster["bbox_xyxy"] = (
+                    matched_cluster["bbox_xyxy"] * matched_cluster["count"]
+                    + np.asarray(player.get("bbox_xyxy") or [0, 0, 0, 0], dtype=np.float32)
+                ) / float(count)
+                matched_cluster["count"] = count
+                if int(matched_cluster.get("track_id", -1)) == -1 and int(player.get("track_id", -1)) != -1:
+                    matched_cluster["track_id"] = int(player.get("track_id", -1))
+
+    fused_players: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        fused_players.append(
+            {
+                "track_id": int(cluster.get("track_id", -1)),
+                "team_id": int(cluster.get("team_id", -1)),
+                "bbox_xyxy": [int(round(v)) for v in cluster["bbox_xyxy"].tolist()],
+                "world_xy": [float(cluster["world_xy"][0]), float(cluster["world_xy"][1])],
+            }
+        )
+
+    ball_candidates: List[np.ndarray] = []
+    ball_bboxes: List[np.ndarray] = []
+    for meta in meta_frames:
+        ball = meta.get("ball")
+        if not isinstance(ball, dict):
+            continue
+        try:
+            ball_candidates.append(np.asarray(ball.get("world_xy"), dtype=np.float32))
+            ball_bboxes.append(np.asarray(ball.get("bbox_xyxy") or [0.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        except Exception:
+            continue
+
+    fused_ball: Optional[Dict[str, Any]] = None
+    if ball_candidates:
+        anchor = ball_candidates[0]
+        close_points = []
+        close_bboxes = []
+        for point, bbox in zip(ball_candidates, ball_bboxes):
+            if float(np.linalg.norm(point - anchor)) <= float(ball_merge_dist_m):
+                close_points.append(point)
+                close_bboxes.append(bbox)
+        if not close_points:
+            close_points = ball_candidates
+            close_bboxes = ball_bboxes
+        fused_ball = {
+            "bbox_xyxy": np.mean(np.stack(close_bboxes, axis=0), axis=0).astype(float).tolist(),
+            "world_xy": np.mean(np.stack(close_points, axis=0), axis=0).astype(float).tolist(),
+        }
+
+    return {"players": fused_players, "ball": fused_ball}
+
+
+def _parse_yolo_boxes(result: Any, conf_thres: float) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    person_dets: List[np.ndarray] = []
+    ball_boxes: List[np.ndarray] = []
+
+    if result is None or getattr(result, "boxes", None) is None:
+        return person_dets, ball_boxes
+
+    try:
+        boxes = result.boxes
+        xyxy = boxes.xyxy.detach().cpu().numpy() if getattr(boxes, "xyxy", None) is not None else np.zeros((0, 4), dtype=np.float32)
+        confs = boxes.conf.detach().cpu().numpy() if getattr(boxes, "conf", None) is not None else np.zeros((xyxy.shape[0],), dtype=np.float32)
+        clss = boxes.cls.detach().cpu().numpy() if getattr(boxes, "cls", None) is not None else np.zeros((xyxy.shape[0],), dtype=np.float32)
+    except Exception:
+        return person_dets, ball_boxes
+
+    for i in range(int(xyxy.shape[0])):
+        try:
+            cls_id = int(clss[i])
+            conf = float(confs[i])
+            if conf < float(conf_thres):
+                continue
+            x1, y1, x2, y2 = [float(v) for v in xyxy[i].tolist()]
+            if cls_id == 0:
+                person_dets.append(np.array([x1, y1, x2, y2, conf, float(cls_id)], dtype=np.float32))
+            elif cls_id == 1:
+                ball_boxes.append(np.array([x1, y1, x2, y2], dtype=np.float32))
+        except Exception:
+            continue
+
+    return person_dets, ball_boxes
+
+
+def _render_meta_frame(
+    *,
+    background: np.ndarray,
+    meta_frame: Dict[str, Any],
+    scale: int = 8,
+    margin: int = 50,
+) -> np.ndarray:
+    frame = background.copy()
+
+    pitch_length = 105
+    pitch_width = 68
+
+    def world_to_minimap(pt2d: List[float]) -> Tuple[int, int]:
+        mx = int((float(pt2d[0]) + pitch_length / 2) * scale + margin)
+        my = int((float(pt2d[1]) + pitch_width / 2) * scale + margin)
+        return mx, my
+
+    for p in meta_frame.get("players") or []:
+        try:
+            world_xy = p.get("world_xy")
+            if world_xy is None:
+                continue
+            mx, my = world_to_minimap(world_xy)
+            team_id = int(p.get("team_id", -1))
+            dot_c = (200, 200, 200)
+            if team_id == 0:
+                dot_c = (255, 100, 100)
+            elif team_id == 1:
+                dot_c = (100, 100, 255)
+            cv2.circle(frame, (mx, my), 6, (255, 255, 255), -1)
+            cv2.circle(frame, (mx, my), 4, dot_c, -1)
+        except Exception:
+            continue
+
+    ball = meta_frame.get("ball")
+    if isinstance(ball, dict) and ball.get("world_xy") is not None:
+        try:
+            mx, my = world_to_minimap(ball["world_xy"])
+            cv2.circle(frame, (mx, my), 6, (0, 0, 0), -1)
+            cv2.circle(frame, (mx, my), 4, (0, 165, 255), -1)
+        except Exception:
+            pass
+
+    return frame
+
+
+def _lerp_values(a: List[float], b: List[float], alpha: float) -> List[float]:
+    if len(a) != len(b):
+        return list(a if alpha < 0.5 else b)
+    return [float((1.0 - alpha) * float(av) + alpha * float(bv)) for av, bv in zip(a, b)]
+
+
+def _apply_interpolation_curve(alpha: float, interpolation_mode: str) -> float:
+    alpha = max(0.0, min(1.0, float(alpha)))
+    if interpolation_mode == "smoothstep":
+        return float(alpha * alpha * (3.0 - 2.0 * alpha))
+    return alpha
+
+
+def _interpolate_meta_frames(
+    prev_meta: Dict[str, Any],
+    next_meta: Dict[str, Any],
+    alpha: float,
+    interpolation_mode: str = "linear",
+) -> Dict[str, Any]:
+    alpha = max(0.0, min(1.0, float(alpha)))
+    interp_alpha = _apply_interpolation_curve(alpha, interpolation_mode)
+
+    prev_players = {
+        int(p.get("track_id", -1)): p
+        for p in (prev_meta.get("players") or [])
+        if isinstance(p, dict) and int(p.get("track_id", -1)) != -1
+    }
+    next_players = {
+        int(p.get("track_id", -1)): p
+        for p in (next_meta.get("players") or [])
+        if isinstance(p, dict) and int(p.get("track_id", -1)) != -1
+    }
+
+    players_out: List[Dict[str, Any]] = []
+    for track_id in sorted(set(prev_players.keys()) | set(next_players.keys())):
+        prev_player = prev_players.get(track_id)
+        next_player = next_players.get(track_id)
+        if prev_player is not None and next_player is not None:
+            prev_xy = prev_player.get("world_xy")
+            next_xy = next_player.get("world_xy")
+            if prev_xy is None or next_xy is None:
+                base_player = prev_player if interp_alpha < 0.5 else next_player
+            else:
+                base_player = dict(prev_player if interp_alpha < 0.5 else next_player)
+                base_player["world_xy"] = _lerp_values(list(prev_xy), list(next_xy), interp_alpha)
+                prev_bbox = prev_player.get("bbox_xyxy")
+                next_bbox = next_player.get("bbox_xyxy")
+                if prev_bbox is not None and next_bbox is not None:
+                    base_player["bbox_xyxy"] = [int(round(v)) for v in _lerp_values(list(prev_bbox), list(next_bbox), interp_alpha)]
+            players_out.append(base_player)
+        elif prev_player is not None and interp_alpha < 0.5:
+            players_out.append(dict(prev_player))
+        elif next_player is not None and interp_alpha >= 0.5:
+            players_out.append(dict(next_player))
+
+    out_ball: Optional[Dict[str, Any]] = None
+    prev_ball = prev_meta.get("ball") if isinstance(prev_meta.get("ball"), dict) else None
+    next_ball = next_meta.get("ball") if isinstance(next_meta.get("ball"), dict) else None
+    if prev_ball is not None and next_ball is not None:
+        out_ball = dict(prev_ball if interp_alpha < 0.5 else next_ball)
+        prev_xy = prev_ball.get("world_xy")
+        next_xy = next_ball.get("world_xy")
+        if prev_xy is not None and next_xy is not None:
+            out_ball["world_xy"] = _lerp_values(list(prev_xy), list(next_xy), interp_alpha)
+        prev_bbox = prev_ball.get("bbox_xyxy")
+        next_bbox = next_ball.get("bbox_xyxy")
+        if prev_bbox is not None and next_bbox is not None:
+            out_ball["bbox_xyxy"] = _lerp_values(list(prev_bbox), list(next_bbox), interp_alpha)
+    elif prev_ball is not None and interp_alpha < 0.5:
+        out_ball = dict(prev_ball)
+    elif next_ball is not None and interp_alpha >= 0.5:
+        out_ball = dict(next_ball)
+
+    return {"players": players_out, "ball": out_ball}
+
+
+def _write_frame_record(
+    *,
+    vw: Any,
+    f_frames: Any,
+    frame_bgr: np.ndarray,
+    frame_idx: int,
+    fps: float,
+    frames_stride: int,
+    calib_res: bool,
+    rep_err: Optional[float],
+    meta_frame: Dict[str, Any],
+    sampled_frame_idx: int,
+    sampled_frame_t: float,
+    interpolation_alpha: Optional[float] = None,
+    interpolation_from_idx: Optional[int] = None,
+    interpolation_to_idx: Optional[int] = None,
+) -> None:
+    vw.write(frame_bgr)
+
+    if f_frames is not None and (frame_idx % frames_stride == 0):
+        rec: Dict[str, Any] = {
+            "frame_idx": int(frame_idx),
+            "t": float(frame_idx) / float(max(1e-6, fps)),
+            "fps": float(fps),
+            "calibration_ok": bool(calib_res),
+            "rep_err": rep_err,
+            "data": meta_frame,
+            "sampled_frame_idx": int(sampled_frame_idx),
+            "sampled_frame_t": float(sampled_frame_t),
+        }
+        if interpolation_alpha is not None:
+            rec["interpolation_alpha"] = float(interpolation_alpha)
+        if interpolation_from_idx is not None:
+            rec["interpolation_from_idx"] = int(interpolation_from_idx)
+        if interpolation_to_idx is not None:
+            rec["interpolation_to_idx"] = int(interpolation_to_idx)
+        f_frames.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
 def run(
     *,
     source: str,
@@ -224,6 +507,9 @@ def run(
     frames_stride: int = 1,
     progress_every: int = 25,
     max_frames: int = 0,
+    yolo_frame_window: int = 8,
+    yolo_selection_mode: str = "ball_priority",
+    interpolation_mode: str = "linear",
 ) -> CalibrationOutputs:
     import torch
 
@@ -306,6 +592,13 @@ def run(
         "tracks_total": 0,
         "team_cluster_trained": False,
         "team_cluster_collected": 0,
+        "yolo_frame_window": 1,
+        "yolo_windows": 0,
+        "yolo_sampled_frames": 0,
+        "yolo_probe_frames": 0,
+        "yolo_selection_mode": "ball_priority",
+        "interpolation_mode": "linear",
+        "interpolated_output_frames": 0,
     }
 
     try:
@@ -321,6 +614,44 @@ def run(
         max_frames = 0
     if max_frames < 0:
         max_frames = 0
+
+    try:
+        yolo_frame_window = int(yolo_frame_window)
+    except Exception:
+        yolo_frame_window = 8
+    if yolo_frame_window < 1:
+        yolo_frame_window = 1
+    stats["yolo_frame_window"] = int(yolo_frame_window)
+
+    yolo_selection_mode = str(yolo_selection_mode or "ball_priority").strip().lower()
+    if yolo_selection_mode not in {"ball_priority", "first", "fused_window"}:
+        yolo_selection_mode = "ball_priority"
+    stats["yolo_selection_mode"] = yolo_selection_mode
+
+    interpolation_mode = str(interpolation_mode or "linear").strip().lower()
+    if interpolation_mode not in {"linear", "smoothstep"}:
+        interpolation_mode = "linear"
+    stats["interpolation_mode"] = interpolation_mode
+
+    run_config = {
+        "source": str(Path(source).resolve()),
+        "detector_weights": str(Path(detector_weights).resolve()),
+        "kp_weights": str(Path(kp_weights).resolve()),
+        "line_weights": str(Path(line_weights).resolve()),
+        "conf_thres": float(conf_thres),
+        "frames_stride": int(frames_stride),
+        "progress_every": int(progress_every),
+        "max_frames": int(max_frames),
+        "yolo_frame_window": int(yolo_frame_window),
+        "yolo_selection_mode": str(yolo_selection_mode),
+        "interpolation_mode": str(interpolation_mode),
+        "write_frames_jsonl": bool(out_frames and str(out_frames).strip()),
+    }
+
+    try:
+        print("__CONFIG__ " + json.dumps(run_config, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
 
     # Prepare map writer (fixed pitch canvas)
     scale = 8
@@ -361,54 +692,138 @@ def run(
 
     frame_idx = 0
     f_frames = None
+    pending_sample: Optional[Dict[str, Any]] = None
     try:
         if write_frames and out_frames_p is not None:
             f_frames = open(out_frames_p, "w", encoding="utf-8")
 
         while True:
-            ret, frame_bgr = cap.read()
-            if not ret or frame_bgr is None:
+            frame_batch: List[Tuple[int, np.ndarray]] = []
+
+            while len(frame_batch) < yolo_frame_window:
+                current_frame_idx = frame_idx + len(frame_batch)
+                if max_frames > 0 and current_frame_idx >= max_frames:
+                    break
+
+                ret, next_frame_bgr = cap.read()
+                if not ret or next_frame_bgr is None:
+                    break
+
+                stats["frames"] += 1
+
+                if (current_frame_idx % progress_every) == 0:
+                    try:
+                        msg = "Calibration çalışıyor"
+                        if total_frames > 0:
+                            pct = int((float(current_frame_idx) * 100.0) / float(total_frames))
+                            msg = f"Calibration: {pct}%"
+                        print(
+                            "__PROGRESS__ "
+                            + json.dumps(
+                                {
+                                    "stage": "calibration",
+                                    "current": int(current_frame_idx),
+                                    "total": int(total_frames) if total_frames > 0 else 0,
+                                    "message": msg,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+
+                frame_batch.append((current_frame_idx, next_frame_bgr))
+
+            if not frame_batch:
                 break
 
-            if max_frames > 0 and frame_idx >= max_frames:
-                break
+            selected_batch_idx = len(frame_batch) - 1
+            selected_frame_idx, frame_bgr = frame_batch[selected_batch_idx]
+            selected_track_result = None
+            selected_detect_result = None
+            fused_window_detections: List[Tuple[np.ndarray, List[np.ndarray]]] = []
 
-            stats["frames"] += 1
+            if yolo_selection_mode == "first":
+                selected_batch_idx = 0
+                selected_frame_idx, frame_bgr = frame_batch[0]
+                if tracking_backend == "ultralytics_track":
+                    try:
+                        stats["yolo_probe_frames"] += 1
+                        selected_track_result = det.track(
+                            frame_bgr,
+                            verbose=False,
+                            persist=True,
+                            conf=float(conf_thres),
+                            tracker="bytetrack.yaml",
+                        )
+                    except Exception:
+                        selected_track_result = None
+                else:
+                    try:
+                        stats["yolo_probe_frames"] += 1
+                        probe_results = det(frame_bgr, verbose=False, conf=float(conf_thres))
+                        selected_detect_result = probe_results[0] if probe_results else None
+                    except Exception:
+                        selected_detect_result = None
+            elif yolo_selection_mode == "fused_window":
+                selected_batch_idx = 0
+                selected_frame_idx, frame_bgr = frame_batch[0]
+                for _, candidate_frame_bgr in frame_batch:
+                    try:
+                        stats["yolo_probe_frames"] += 1
+                        probe_results = det(candidate_frame_bgr, verbose=False, conf=float(conf_thres))
+                        probe_result = probe_results[0] if probe_results else None
+                    except Exception:
+                        probe_result = None
+                    candidate_person_dets, candidate_ball_boxes = _parse_yolo_boxes(probe_result, conf_thres)
+                    fused_window_detections.append((np.asarray(candidate_person_dets), list(candidate_ball_boxes)))
+            else:
+                for batch_idx, (candidate_frame_idx, candidate_frame_bgr) in enumerate(frame_batch):
+                    selected_batch_idx = batch_idx
+                    selected_frame_idx = candidate_frame_idx
+                    frame_bgr = candidate_frame_bgr
 
-            if (frame_idx % progress_every) == 0:
-                try:
-                    msg = "Calibration çalışıyor"
-                    if total_frames > 0:
-                        pct = int((float(frame_idx) * 100.0) / float(total_frames))
-                        msg = f"Calibration: {pct}%"
-                    print(
-                        "__PROGRESS__ "
-                        + json.dumps(
-                            {
-                                "stage": "calibration",
-                                "current": int(frame_idx),
-                                "total": int(total_frames) if total_frames > 0 else 0,
-                                "message": msg,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
-                except Exception:
-                    pass
+                    if tracking_backend == "ultralytics_track":
+                        try:
+                            stats["yolo_probe_frames"] += 1
+                            selected_track_result = det.track(
+                                candidate_frame_bgr,
+                                verbose=False,
+                                persist=True,
+                                conf=float(conf_thres),
+                                tracker="bytetrack.yaml",
+                            )
+                        except Exception:
+                            selected_track_result = None
 
-            t_sec = float(frame_idx) / float(max(1e-6, fps))
+                        probe_result = selected_track_result[0] if selected_track_result else None
+                    else:
+                        try:
+                            stats["yolo_probe_frames"] += 1
+                            probe_results = det(candidate_frame_bgr, verbose=False, conf=float(conf_thres))
+                            selected_detect_result = probe_results[0] if probe_results else None
+                        except Exception:
+                            selected_detect_result = None
+
+                        probe_result = selected_detect_result
+
+                    _, candidate_ball_boxes = _parse_yolo_boxes(probe_result, conf_thres)
+                    if candidate_ball_boxes or batch_idx == (len(frame_batch) - 1):
+                        break
+
+            t_sec = float(selected_frame_idx) / float(max(1e-6, fps))
+
+            stats["yolo_windows"] += 1
+            stats["yolo_sampled_frames"] += 1
 
             person_dets: List[np.ndarray] = []
             ball_boxes: List[np.ndarray] = []
+            window_meta_frames: List[Dict[str, Any]] = []
 
             # Detection + tracking
             if tracking_backend == "ultralytics_track":
-                try:
-                    # YOLO.track runs detection internally and attaches IDs when possible.
-                    tr_res = det.track(frame_bgr, verbose=False, persist=True, conf=float(conf_thres), tracker="bytetrack.yaml")
-                except Exception:
-                    tr_res = None
+                tr_res = selected_track_result
 
                 if tr_res and tr_res[0] is not None and getattr(tr_res[0], "boxes", None) is not None:
                     b = tr_res[0].boxes
@@ -449,27 +864,20 @@ def run(
                             continue
             else:
                 # Plain YOLO detect (and optional boxmot tracking)
-                pil_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                results = det(pil_rgb, verbose=False)
-                boxes = (
-                    results[0].boxes.data.cpu().numpy()
-                    if results and results[0].boxes is not None
-                    else np.zeros((0, 6), dtype=np.float32)
-                )
-
-                for bb in boxes:
-                    if float(bb[4]) < float(conf_thres):
-                        continue
-                    cls_id = int(bb[5])
-                    if cls_id == 0:
-                        person_dets.append(bb)
-                    elif cls_id == 1:
-                        ball_boxes.append(bb[:4].copy())
+                person_dets, ball_boxes = _parse_yolo_boxes(selected_detect_result, conf_thres)
 
             if len(person_dets) > 0:
                 stats["frames_with_person_det"] += 1
             if len(ball_boxes) > 0:
                 stats["frames_with_ball_det"] += 1
+
+            if yolo_selection_mode == "fused_window":
+                window_has_person = any(int(det_pack.shape[0]) > 0 for det_pack, _ in fused_window_detections)
+                window_has_ball = any(len(ball_pack) > 0 for _, ball_pack in fused_window_detections)
+                if window_has_person:
+                    stats["frames_with_person_det"] += 1
+                if window_has_ball:
+                    stats["frames_with_ball_det"] += 1
 
             # Tracking + team id
             persons: List[Tuple[np.ndarray, int, int]] = []
@@ -499,7 +907,7 @@ def run(
                             try:
                                 if not clusterer.trained:
                                     # Collect a bit faster by sampling every 3 frames.
-                                    if (frame_idx % 3) == 0:
+                                    if (selected_frame_idx % 3) == 0:
                                         clusterer.collect(feat)
                                         stats["team_cluster_collected"] = int(stats.get("team_cluster_collected", 0)) + 1
                                         if len(getattr(clusterer, "data_bank", [])) >= 50:
@@ -604,9 +1012,29 @@ def run(
                     camera = Camera(iwidth=width, iheight=height)
                     camera.from_json_parameters(params)
 
-                    map_frame, meta_frame = _draw_map_frame(
-                        background=bg, camera=camera, persons=persons, balls=ball_boxes, scale=scale, margin=margin
-                    )
+                    if yolo_selection_mode == "fused_window":
+                        for fused_person_dets, fused_ball_boxes in fused_window_detections:
+                            fused_persons: List[Tuple[np.ndarray, int, int]] = []
+                            for det_row in fused_person_dets:
+                                try:
+                                    fused_persons.append((det_row[:4].astype(np.int32), -1, -1))
+                                except Exception:
+                                    continue
+                            _, meta_candidate = _draw_map_frame(
+                                background=bg,
+                                camera=camera,
+                                persons=fused_persons,
+                                balls=fused_ball_boxes,
+                                scale=scale,
+                                margin=margin,
+                            )
+                            window_meta_frames.append(meta_candidate)
+                        meta_frame = _fuse_meta_frames(window_meta_frames) if window_meta_frames else {"players": [], "ball": None}
+                        map_frame = _render_meta_frame(background=bg, meta_frame=meta_frame, scale=scale, margin=margin)
+                    else:
+                        map_frame, meta_frame = _draw_map_frame(
+                            background=bg, camera=camera, persons=persons, balls=ball_boxes, scale=scale, margin=margin
+                        )
 
                     try:
                         stats["calibration_ok_frames"] += 1
@@ -737,22 +1165,93 @@ def run(
                     # If any calibration-dependent step fails, fall back to empty map frame.
                     pass
 
-            # Always write a frame to keep sync with main video
-            vw.write(map_frame)
+            sample_packet = {
+                "frame_idx": int(selected_frame_idx),
+                "t": float(t_sec),
+                "meta_frame": meta_frame,
+                "map_frame": map_frame,
+                "calibration_ok": bool(calib_res),
+                "rep_err": rep_err,
+            }
 
-            # Per-frame metadata (optional; can be huge)
-            if f_frames is not None and (frame_idx % frames_stride == 0):
-                rec = {
-                    "frame_idx": int(frame_idx),
-                    "t": float(t_sec),
-                    "fps": float(fps),
-                    "calibration_ok": bool(calib_res),
-                    "rep_err": rep_err,
-                    "data": meta_frame,
-                }
-                f_frames.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if pending_sample is None:
+                for lead_frame_idx in range(int(frame_batch[0][0]), int(selected_frame_idx)):
+                    _write_frame_record(
+                        vw=vw,
+                        f_frames=f_frames,
+                        frame_bgr=map_frame,
+                        frame_idx=lead_frame_idx,
+                        fps=fps,
+                        frames_stride=frames_stride,
+                        calib_res=bool(calib_res),
+                        rep_err=rep_err,
+                        meta_frame=meta_frame,
+                        sampled_frame_idx=int(selected_frame_idx),
+                        sampled_frame_t=float(t_sec),
+                    )
+            else:
+                prev_frame_idx = int(pending_sample["frame_idx"])
+                next_frame_idx = int(selected_frame_idx)
+                frame_gap = max(1, next_frame_idx - prev_frame_idx)
+                for out_frame_idx in range(prev_frame_idx, next_frame_idx):
+                    alpha = float(out_frame_idx - prev_frame_idx) / float(frame_gap)
+                    interp_meta = _interpolate_meta_frames(
+                        pending_sample["meta_frame"],
+                        meta_frame,
+                        alpha,
+                        interpolation_mode,
+                    )
+                    interp_frame = _render_meta_frame(
+                        background=bg,
+                        meta_frame=interp_meta,
+                        scale=scale,
+                        margin=margin,
+                    )
+                    interp_calib_ok = bool(pending_sample["calibration_ok"] if alpha < 0.5 else calib_res)
+                    if pending_sample["rep_err"] is not None and rep_err is not None:
+                        interp_rep_err = float((1.0 - alpha) * float(pending_sample["rep_err"]) + alpha * float(rep_err))
+                    else:
+                        interp_rep_err = pending_sample["rep_err"] if alpha < 0.5 else rep_err
+                    _write_frame_record(
+                        vw=vw,
+                        f_frames=f_frames,
+                        frame_bgr=interp_frame,
+                        frame_idx=out_frame_idx,
+                        fps=fps,
+                        frames_stride=frames_stride,
+                        calib_res=interp_calib_ok,
+                        rep_err=interp_rep_err,
+                        meta_frame=interp_meta,
+                        sampled_frame_idx=int(selected_frame_idx if alpha >= 0.5 else prev_frame_idx),
+                        sampled_frame_t=float(t_sec if alpha >= 0.5 else pending_sample["t"]),
+                        interpolation_alpha=alpha,
+                        interpolation_from_idx=prev_frame_idx,
+                        interpolation_to_idx=next_frame_idx,
+                    )
+                    if alpha > 0.0:
+                        stats["interpolated_output_frames"] += 1
 
-            frame_idx += 1
+            pending_sample = sample_packet
+
+            frame_idx += len(frame_batch)
+
+        if pending_sample is not None:
+            final_start_idx = int(pending_sample["frame_idx"])
+            final_end_idx = int(frame_idx)
+            for out_frame_idx in range(final_start_idx, final_end_idx):
+                _write_frame_record(
+                    vw=vw,
+                    f_frames=f_frames,
+                    frame_bgr=pending_sample["map_frame"],
+                    frame_idx=out_frame_idx,
+                    fps=fps,
+                    frames_stride=frames_stride,
+                    calib_res=bool(pending_sample["calibration_ok"]),
+                    rep_err=pending_sample["rep_err"],
+                    meta_frame=pending_sample["meta_frame"],
+                    sampled_frame_idx=int(pending_sample["frame_idx"]),
+                    sampled_frame_t=float(pending_sample["t"]),
+                )
     finally:
         try:
             if f_frames is not None:
@@ -828,6 +1327,7 @@ def run(
                 "schema_version": "1.0",
                 "created_utc": None,
                 "source": {"video_path": str(Path(source).resolve())},
+                "run_config": run_config,
                 "artifacts": {
                     "map_video_path": str(out_map_p.resolve()),
                     **({"frames_jsonl_path": str(out_frames_p.resolve())} if write_frames and out_frames_p is not None else {}),
@@ -862,6 +1362,26 @@ def main() -> None:
     ap.add_argument("--frames_stride", type=int, default=1, help="write every N frames into jsonl (only if out_frames is set)")
     ap.add_argument("--progress_every", type=int, default=25, help="emit progress every N frames")
     ap.add_argument("--max_frames", type=int, default=0, help="process at most N frames (0 = all)")
+    ap.add_argument(
+        "--yolo_frame_window",
+        type=int,
+        default=8,
+        help="run YOLO on one selected frame per N-frame window, preferring the earliest frame with a ball",
+    )
+    ap.add_argument(
+        "--yolo_selection_mode",
+        type=str,
+        default="ball_priority",
+        choices=["ball_priority", "first", "fused_window"],
+        help="choose earliest-ball probing, always-first sampling, or fused detections from all frames in each window",
+    )
+    ap.add_argument(
+        "--interpolation_mode",
+        type=str,
+        default="linear",
+        choices=["linear", "smoothstep"],
+        help="choose how skipped output frames are interpolated between sampled map states",
+    )
     ap.add_argument("--detector", type=str, default=str(THIS_DIR / "best.pt"), help="YOLO weights path")
     ap.add_argument("--kp_weights", type=str, default=str(THIS_DIR / "SV_kp.pth"), help="HRNet keypoints weights")
     ap.add_argument("--line_weights", type=str, default=str(THIS_DIR / "SV_lines.pth"), help="HRNet lines weights")
@@ -880,6 +1400,9 @@ def main() -> None:
         frames_stride=int(args.frames_stride),
         progress_every=int(args.progress_every),
         max_frames=int(args.max_frames),
+        yolo_frame_window=int(args.yolo_frame_window),
+        yolo_selection_mode=str(args.yolo_selection_mode),
+        interpolation_mode=str(args.interpolation_mode),
     )
 
     # Print a short machine-readable summary for the caller.
