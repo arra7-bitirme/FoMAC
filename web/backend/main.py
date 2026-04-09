@@ -571,7 +571,11 @@ class RunFullPipelineRequest(BaseModel):
     # jersey number recognition (Qwen-VL)
     run_jersey_number_recognition: bool = True
     qwen_vl_url: str = "http://localhost:8080/"
-    qwen_vl_model: str = "qwen3vl8b"
+    qwen_vl_model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
+    qwen_vl_manage_container: bool = True
+    qwen_vl_container_id: str = "4d2ba276bce6347e95bb962a538bf43d70057a151d0ea03e35110c85ec0ec36c"
+    qwen_vl_stop_before_commentary: bool = True
+    qwen_vl_ready_timeout_sec: float = 60.0
     jersey_prompt: str = (
         "You are reading a football jersey.\n\n"
         "Visually read the number printed on the player's shirt.\n\n"
@@ -597,6 +601,25 @@ class RunFullPipelineRequest(BaseModel):
     jersey_merge_same_number: bool = True
     jersey_merge_min_confidence: float = 0.60
     jersey_merge_max_overlap_frames: int = 5
+
+    # commentary
+    run_commentary: bool = True
+    commentary_max_events: int = 30
+    commentary_possession_max_age_sec: float = 8.0
+    commentary_llm_backend: str = "ollama"
+    commentary_llm_url: str = "http://localhost:11434/"
+    commentary_llm_model: str = "qwen3.5:9b"
+    commentary_flush_gpu_before_llm: bool = True
+    commentary_context_window_sec: float = 12.0
+    commentary_context_stride_sec: float = 1.0
+    commentary_context_max_samples: int = 9
+    commentary_segment_sec: float = 7.0
+    commentary_state_interval_sec: float = 10.0
+    commentary_llm_timeout_sec: float = 90.0
+    commentary_min_audio_gap_sec: float = 0.35
+    commentary_enable_tts: bool = True
+    commentary_tts_backend: str = "xttsv2"
+    commentary_speaker_wav: Optional[str] = None
 
     # heuristics
     possession_dist_norm: float = 0.08
@@ -644,6 +667,10 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         run_jersey_number_recognition=bool(req.run_jersey_number_recognition),
         qwen_vl_url=str(req.qwen_vl_url),
         qwen_vl_model=str(req.qwen_vl_model),
+        qwen_vl_manage_container=bool(req.qwen_vl_manage_container),
+        qwen_vl_container_id=str(req.qwen_vl_container_id),
+        qwen_vl_stop_before_commentary=bool(req.qwen_vl_stop_before_commentary),
+        qwen_vl_ready_timeout_sec=float(req.qwen_vl_ready_timeout_sec),
         jersey_prompt=str(req.jersey_prompt),
         jersey_max_tracks=int(req.jersey_max_tracks),
         jersey_max_samples_per_track=int(req.jersey_max_samples_per_track),
@@ -658,6 +685,23 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         jersey_merge_same_number=bool(req.jersey_merge_same_number),
         jersey_merge_min_confidence=float(req.jersey_merge_min_confidence),
         jersey_merge_max_overlap_frames=int(req.jersey_merge_max_overlap_frames),
+        run_commentary=bool(req.run_commentary),
+        commentary_max_events=int(req.commentary_max_events),
+        commentary_possession_max_age_sec=float(req.commentary_possession_max_age_sec),
+        commentary_llm_backend=str(req.commentary_llm_backend),
+        commentary_llm_url=str(req.commentary_llm_url),
+        commentary_llm_model=str(req.commentary_llm_model),
+        commentary_flush_gpu_before_llm=bool(req.commentary_flush_gpu_before_llm),
+        commentary_context_window_sec=float(req.commentary_context_window_sec),
+        commentary_context_stride_sec=float(req.commentary_context_stride_sec),
+        commentary_context_max_samples=int(req.commentary_context_max_samples),
+        commentary_segment_sec=float(req.commentary_segment_sec),
+        commentary_state_interval_sec=float(req.commentary_state_interval_sec),
+        commentary_llm_timeout_sec=float(req.commentary_llm_timeout_sec),
+        commentary_min_audio_gap_sec=float(req.commentary_min_audio_gap_sec),
+        commentary_enable_tts=bool(req.commentary_enable_tts),
+        commentary_tts_backend=str(req.commentary_tts_backend),
+        commentary_speaker_wav=req.commentary_speaker_wav,
         possession_dist_norm=float(req.possession_dist_norm),
         possession_stable_frames=int(req.possession_stable_frames),
         possession_stride_frames=int(req.possession_stride_frames),
@@ -802,16 +846,41 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 run_jersey_number_recognition=bool(req.run_jersey_number_recognition),
                 qwen_vl_url=str(req.qwen_vl_url),
                 qwen_vl_model=str(req.qwen_vl_model),
+                qwen_vl_manage_container=bool(req.qwen_vl_manage_container),
+                qwen_vl_container_id=str(req.qwen_vl_container_id),
+                qwen_vl_stop_before_commentary=bool(req.qwen_vl_stop_before_commentary),
+                qwen_vl_ready_timeout_sec=float(req.qwen_vl_ready_timeout_sec),
                 jersey_prompt=str(req.jersey_prompt),
                 jersey_max_tracks=int(req.jersey_max_tracks),
                 jersey_max_samples_per_track=int(req.jersey_max_samples_per_track),
                 jersey_min_det_conf=float(req.jersey_min_det_conf),
                 jersey_min_box_area=int(req.jersey_min_box_area),
                 jersey_min_frame_gap=int(req.jersey_min_frame_gap),
+                jersey_frame_topk=int(req.jersey_frame_topk),
+                jersey_crops_dir=req.jersey_crops_dir,
+                jersey_vis_filter=bool(req.jersey_vis_filter),
+                jersey_vis_min_score=float(req.jersey_vis_min_score),
                 jersey_in_tracking=bool(req.jersey_in_tracking),
                 jersey_merge_same_number=bool(req.jersey_merge_same_number),
                 jersey_merge_min_confidence=float(req.jersey_merge_min_confidence),
                 jersey_merge_max_overlap_frames=int(req.jersey_merge_max_overlap_frames),
+                run_commentary=bool(req.run_commentary),
+                commentary_max_events=int(req.commentary_max_events),
+                commentary_possession_max_age_sec=float(req.commentary_possession_max_age_sec),
+                commentary_llm_backend=str(req.commentary_llm_backend),
+                commentary_llm_url=str(req.commentary_llm_url),
+                commentary_llm_model=str(req.commentary_llm_model),
+                commentary_flush_gpu_before_llm=bool(req.commentary_flush_gpu_before_llm),
+                commentary_context_window_sec=float(req.commentary_context_window_sec),
+                commentary_context_stride_sec=float(req.commentary_context_stride_sec),
+                commentary_context_max_samples=int(req.commentary_context_max_samples),
+                commentary_segment_sec=float(req.commentary_segment_sec),
+                commentary_state_interval_sec=float(req.commentary_state_interval_sec),
+                commentary_llm_timeout_sec=float(req.commentary_llm_timeout_sec),
+                commentary_min_audio_gap_sec=float(req.commentary_min_audio_gap_sec),
+                commentary_enable_tts=bool(req.commentary_enable_tts),
+                commentary_tts_backend=str(req.commentary_tts_backend),
+                commentary_speaker_wav=req.commentary_speaker_wav,
                 possession_dist_norm=float(req.possession_dist_norm),
                 possession_stable_frames=int(req.possession_stable_frames),
                 possession_stride_frames=int(req.possession_stride_frames),

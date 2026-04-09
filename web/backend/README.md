@@ -72,6 +72,38 @@ Sorun Giderme
 - Port çakışması varsa çalışan başka bir süreç yoksa farklı bir port belirleyin veya mevcut süreci sonlandırın.
 
 Commentary TTS (XTTS v2)
+- Commentary text generation now defaults to Ollama:
+
+   - `commentary_llm_backend=ollama`
+   - `commentary_llm_url=http://localhost:11434/`
+   - `commentary_llm_model=qwen3.5:9b`
+
+- Jersey number recognition remains on the separate Qwen-VL server (`qwen_vl_url`, default `http://localhost:8080/`).
+- The backend can now manage the Qwen-VL Docker container directly:
+
+   - `qwen_vl_manage_container=true`
+   - `qwen_vl_container_id=4d2ba276bce6347e95bb962a538bf43d70057a151d0ea03e35110c85ec0ec36c`
+   - `qwen_vl_stop_before_commentary=true`
+   - `qwen_vl_ready_timeout_sec=60.0`
+
+- During a pipeline run, the backend starts that container before jersey inference and stops it before commentary generation.
+- Commentary generation will not call Ollama unless the VL container stop is confirmed.
+- Commentary prompts now include richer match-state context built from calibration frame windows, possession changes, calibration events, and jersey-aware nearby-player summaries.
+- Tunable request fields:
+
+   - `commentary_context_window_sec=12.0`
+   - `commentary_context_stride_sec=1.0`
+   - `commentary_context_max_samples=9`
+   - `commentary_segment_sec=30.0`
+   - `commentary_state_interval_sec=10.0`
+   - `commentary_llm_timeout_sec=90.0`
+   - `commentary_min_audio_gap_sec=0.35`
+
+- Commentary audio is no longer limited to action spotting only. The backend now builds commentary anchors from action spotting, calibration events, possession changes, and periodic state windows across the match timeline.
+- Commentary is now produced as one short clip per timeline segment by default, so each speech line stays inside its own window instead of running across the next event block.
+- LLM generation runs per commentary item instead of one large batch, which reduces Ollama timeout risk and makes it easier to synthesize audio for all commentary entries.
+- Recent commentary lines are fed back into the prompt to reduce repetition, and synthesized audio clips are scheduled with a minimum gap to avoid overlapping speech.
+- Before commentary generation, the pipeline performs a best-effort local CUDA cache cleanup so Ollama can claim GPU memory more reliably.
 - Varsayılan backend: `xttsv2` (Coqui XTTS v2).
 - XTTS v2, bir referans ses dosyası ister. Windows'ta env ile verin:
 

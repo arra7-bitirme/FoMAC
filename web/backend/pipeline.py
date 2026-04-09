@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 import csv
+import gc
 import json
 import os
 import subprocess
@@ -8,6 +10,7 @@ import sys
 import time
 import re
 import tempfile
+import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +64,11 @@ class FullPipelineConfig:
     # jersey number recognition (Qwen-VL)
     run_jersey_number_recognition: bool = True
     qwen_vl_url: str = "http://localhost:8080/"
-    qwen_vl_model: str = "qwen3vl8b"
+    qwen_vl_model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
+    qwen_vl_manage_container: bool = True
+    qwen_vl_container_id: str = "4d2ba276bce6347e95bb962a538bf43d70057a151d0ea03e35110c85ec0ec36c"
+    qwen_vl_stop_before_commentary: bool = True
+    qwen_vl_ready_timeout_sec: float = 60.0
     jersey_prompt: str = (
         "You are reading a football jersey.\n\n"
         "Visually read the number printed on the player's shirt.\n\n"
@@ -96,6 +103,17 @@ class FullPipelineConfig:
     run_commentary: bool = True
     commentary_max_events: int = 30
     commentary_possession_max_age_sec: float = 8.0
+    commentary_llm_backend: str = "ollama"
+    commentary_llm_url: str = "http://localhost:11434/"
+    commentary_llm_model: str = "qwen3.5:9b"
+    commentary_flush_gpu_before_llm: bool = True
+    commentary_context_window_sec: float = 12.0
+    commentary_context_stride_sec: float = 1.0
+    commentary_context_max_samples: int = 9
+    commentary_segment_sec: float = 30.0
+    commentary_state_interval_sec: float = 10.0
+    commentary_llm_timeout_sec: float = 90.0
+    commentary_min_audio_gap_sec: float = 0.35
     # TTS + audio mixing onto overlay video
     commentary_enable_tts: bool = True
     commentary_tts_backend: str = "xttsv2"
@@ -436,21 +454,557 @@ def _qwen_text_openai_compatible(
     return raw, None
 
 
+def _ollama_text_chat(
+    *,
+    base_url: str,
+    model: str,
+    prompt: str,
+    timeout_sec: float = 120.0,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort Ollama native chat call."""
+    if httpx is None:
+        return None, None
+
+    base = _normalize_base_url(base_url)
+    if not base:
+        return None, None
+
+    endpoint = base + "/api/chat"
+    payload = {
+        "model": str(model or "qwen3.5:9b"),
+        "stream": False,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a Turkish football commentator.",
+            },
+            {
+                "role": "user",
+                "content": str(prompt or ""),
+            },
+        ],
+    }
+
+    try:
+        with httpx.Client(timeout=float(timeout_sec)) as client:
+            r = client.post(endpoint, json=payload)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return None, str(e)
+
+    raw = ""
+    try:
+        msg = data.get("message") or {}
+        raw = str(msg.get("content") or "").strip()
+        if not raw:
+            raw = str(data.get("response") or "").strip()
+    except Exception:
+        raw = ""
+
+    return raw, None
+
+
+def _normalize_commentary_backend(name: str) -> str:
+    raw = str(name or "").strip().lower()
+    if raw in ("", "ollama", "ollama-native", "native"):
+        return "ollama"
+    if raw in ("openai", "openai-compatible", "compat", "llama.cpp", "vllm"):
+        return "openai"
+    return raw
+
+
+def _request_commentary_text(
+    *,
+    base_url: str,
+    model: str,
+    prompt: str,
+    backend: str,
+    timeout_sec: float = 120.0,
+) -> Tuple[Optional[str], Optional[str]]:
+    mode = _normalize_commentary_backend(backend)
+    if mode == "ollama":
+        raw, err = _ollama_text_chat(
+            base_url=base_url,
+            model=model,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+        )
+        if raw:
+            return raw, None
+
+        compat_raw, compat_err = _qwen_text_openai_compatible(
+            base_url=base_url,
+            model=model,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+        )
+        if compat_raw:
+            return compat_raw, None
+        return None, err or compat_err
+
+    return _qwen_text_openai_compatible(
+        base_url=base_url,
+        model=model,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+    )
+
+
+def _flush_gpu_vram() -> Dict[str, Any]:
+    """Best-effort cleanup for local CUDA allocations before commentary generation."""
+    info: Dict[str, Any] = {
+        "gc_collected": 0,
+        "torch_available": False,
+        "cuda_available": False,
+        "empty_cache_called": False,
+        "ipc_collect_called": False,
+    }
+    started = time.perf_counter()
+
+    try:
+        info["gc_collected"] = int(gc.collect())
+    except Exception as e:
+        info["gc_error"] = str(e)
+
+    try:
+        import torch  # type: ignore
+
+        info["torch_available"] = True
+        cuda_ok = bool(torch.cuda.is_available())
+        info["cuda_available"] = cuda_ok
+        if cuda_ok:
+            try:
+                if hasattr(torch.cuda, "mem_get_info"):
+                    free_before, total_before = torch.cuda.mem_get_info()
+                    info["free_bytes_before"] = int(free_before)
+                    info["total_bytes"] = int(total_before)
+            except Exception:
+                pass
+
+            torch.cuda.empty_cache()
+            info["empty_cache_called"] = True
+
+            if hasattr(torch.cuda, "ipc_collect"):
+                try:
+                    torch.cuda.ipc_collect()
+                    info["ipc_collect_called"] = True
+                except Exception as e:
+                    info["ipc_collect_error"] = str(e)
+
+            try:
+                if hasattr(torch.cuda, "mem_get_info"):
+                    free_after, _total_after = torch.cuda.mem_get_info()
+                    info["free_bytes_after"] = int(free_after)
+            except Exception:
+                pass
+    except Exception as e:
+        info["torch_error"] = str(e)
+
+    info["elapsed_sec"] = round(time.perf_counter() - started, 3)
+    return info
+
+
 def _build_commentary_prompt(items: List[Dict[str, Any]]) -> str:
-    """Hardcoded prompt for Qwen (requested)."""
+    """Prompt with richer per-window match-state context for Turkish commentary."""
     return (
-        "Sen bir futbol maç spikerisin. Aşağıda zaman damgası ile olay listesi var.\n"
-        "Her olay için en fazla 2 cümlelik, doğal ve heyecanlı Türkçe yorum yaz.\n"
+        "Sen güçlü bir futbol maç spikerisin. Aşağıda her olay için zaman penceresi boyunca toplanmış maç durumu verisi var.\n"
+        "Her olay için en fazla 2 cümlelik, doğal, akıcı ve sahadaki oyunun akışını anlatan Türkçe yorum yaz.\n"
         "Kurallar:\n"
         "- Sadece Türkçe yaz.\n"
         "- Aynı zaman damgasını koru.\n"
-        "- Oyuncu bilgisi varsa (#track_id ve forma_no) onu kullan.\n"
-        "- Tahmin etme; belirsizse genel konuş.\n"
+        "- Oyuncu bilgisi varsa (#track_id, forma_no, takım_id) onu kullan.\n"
+        "- Kalibrasyon çerçevelerindeki top konumu, baskı seviyesi, kanat/merkez geçişi, ceza sahası çevresi, topun yönü gibi bağlamı kullan.\n"
+        "- Pencere içindeki possession ve calibration event bilgisini birlikte değerlendir.\n"
+        "- Veri açıkça desteklemiyorsa kesin hüküm verme; belirsizse genel ama maç akışına uygun konuş.\n"
         "- ÇIKTI FORMAT: Sadece JSON array döndür.\n"
         "JSON şeması: [{\"t\": <float saniye>, \"timecode\": \"MM:SS\", \"text\": \"...\"}]\n\n"
+        "Her olay girdisinde şunlar bulunabilir: olay etiketi, aktör bilgisi, zaman penceresi, kalibrasyon örnek kareleri, topun saha içi akışı, baskı özeti, pencere içi olaylar.\n\n"
         "Olaylar JSON:\n"
         + json.dumps(items, ensure_ascii=False, indent=2)
     )
+
+
+def _commentary_style_for_item(item: Dict[str, Any]) -> str:
+    styles = [
+        "yüksek tempolu ve coşkulu anlatım",
+        "taktik odaklı ama akıcı anlatım",
+        "kanat oyunu ve alan kullanımı odaklı anlatım",
+        "orta saha mücadelesi ve baskı odaklı anlatım",
+        "ceza sahası çevresi tehdidini öne çıkaran anlatım",
+    ]
+    seed = f"{item.get('timecode')}|{item.get('event_label')}|{item.get('event_source')}"
+    try:
+        idx = sum(ord(ch) for ch in seed) % len(styles)
+    except Exception:
+        idx = 0
+    return styles[idx]
+
+
+def _build_commentary_item_prompt(item: Dict[str, Any], recent_texts: List[str]) -> str:
+    style = _commentary_style_for_item(item)
+    window = item.get("window") if isinstance(item, dict) else None
+    window = window if isinstance(window, dict) else {}
+    period_sec = float(window.get("duration_sec", item.get("segment_duration_sec", 10.0)) or 10.0)
+    max_sentences = _commentary_sentence_budget(period_sec)
+    max_words = _commentary_word_budget(period_sec)
+    return (
+        "Sen Türkçe futbol anlatımı yapan canlı maç spikerisin.\n"
+        "Aşağıda tek bir zaman penceresine ait maç durumu var.\n"
+        f"Üslup hedefi: {style}.\n"
+        "Görev: Bu pencere için kısa, kesin ve akıcı tek bir yorum üret.\n"
+        "Kesin kurallar:\n"
+        "- Sadece Türkçe yaz.\n"
+        "- JSON object döndür: {\"text\": \"...\"}\n"
+        f"- En fazla {max_sentences} cümle kullan.\n"
+        f"- En fazla {max_words} kelime kullan.\n"
+        f"- Bu yorum yaklaşık {int(round(period_sec))} saniyelik pencereye sığmalı; uzun paragraf yazma.\n"
+        "- 'veya', 'ya da', 'olabilir', 'muhtemelen', 'belki', 'gibi görünüyor', 'top görünmüyor' gibi belirsizlik ifadeleri kullanma.\n"
+        "- Görsel eksikliği veya veri eksikliği hakkında konuşma.\n"
+        "- Eldeki bağlama dayan, ama kesin olmayan oyuncu kimliği uydurma.\n"
+        "- Oyun yönü, baskı, kanat kullanımı, merkez bağlantısı, ceza sahası çevresi, savunmadan çıkış gibi futbol dili kullan.\n"
+        "- Pası veren oyuncu açıkça destekleniyorsa söyle; emin değilsen isim ya da forma uydurma.\n\n"
+        "- Son üretilen cümleleri tekrar etme; her satıra farklı bir giriş ve akış ver.\n\n"
+        "Son yorumlar (tekrar etme):\n"
+        + json.dumps(recent_texts[-4:], ensure_ascii=False)
+        + "\n\n"
+        "Pencere verisi JSON:\n"
+        + json.dumps(item, ensure_ascii=False, indent=2)
+    )
+
+
+def _extract_commentary_text_best_effort(raw: str) -> Optional[str]:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
+    s = re.sub(r"\s*```$", "", s.strip())
+
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            txt = str(obj.get("text") or "").strip()
+            return txt or None
+        if isinstance(obj, list) and obj:
+            first = obj[0]
+            if isinstance(first, dict):
+                txt = str(first.get("text") or "").strip()
+                return txt or None
+            if isinstance(first, str):
+                return str(first).strip() or None
+    except Exception:
+        pass
+
+    m = re.search(r'"text"\s*:\s*"([^"]+)"', s)
+    if m:
+        return str(m.group(1)).strip() or None
+
+    return s.strip() or None
+
+
+def _match_state_fallback_sentence(match_state: Dict[str, Any]) -> str:
+    state = match_state.get("state_summary") if isinstance(match_state, dict) else None
+    state = state if isinstance(state, dict) else {}
+    progression = str(state.get("ball_progression") or "").strip()
+    tags = [str(x).strip() for x in (state.get("state_tags") or []) if str(x).strip()]
+    pressure = str(state.get("pressure_level") or "").strip().lower()
+    regions = [str(x).strip() for x in (state.get("ball_regions") or []) if str(x).strip()]
+
+    parts: List[str] = []
+    if progression and "net izlenemiyor" not in progression.lower():
+        parts.append(progression[:1].upper() + progression[1:])
+    elif "kanat kullanımı" in tags:
+        parts.append("Oyun kenarlara açılıyor")
+    elif regions:
+        parts.append(f"Oyun {regions[0]} üzerinden şekilleniyor")
+    else:
+        parts.append("Takımlar oyunu yeniden kuruyor")
+
+    if pressure == "yüksek":
+        parts.append("Orta sahada baskı çok sert")
+    elif pressure == "orta":
+        parts.append("Merkezde temas ve baskı artıyor")
+    elif "ceza sahası çevresi" in tags:
+        parts.append("Ceza sahası çevresinde hareketlilik var")
+
+    text = ". ".join(p.rstrip(".!") for p in parts if p).strip()
+    return (text + ".") if text else "Oyun akışı tempolu biçimde sürüyor."
+
+
+def _normalize_commentary_compare(text: str) -> str:
+    s = str(text or "").lower()
+    s = re.sub(r"[^a-z0-9çğıöşü\s]", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _is_repetitive_commentary(text: str, recent_texts: List[str]) -> bool:
+    cur = _normalize_commentary_compare(text)
+    if not cur:
+        return True
+    cur_head = " ".join(cur.split()[:7])
+    for prev in recent_texts[-5:]:
+        pp = _normalize_commentary_compare(prev)
+        if not pp:
+            continue
+        if cur == pp:
+            return True
+        if cur_head and cur_head == " ".join(pp.split()[:7]):
+            return True
+    return False
+
+
+def _fallback_commentary_text(item: Dict[str, Any], recent_texts: Optional[List[str]] = None) -> str:
+    recent_texts = recent_texts or []
+    label = str(item.get("event_label") or "Oyun akışı").strip()
+    desc = str(item.get("description_tr") or "").strip()
+    state_line = _match_state_fallback_sentence(item.get("match_state") or {})
+    style = _commentary_style_for_item(item)
+
+    event_sentence = ""
+    if label == "Throw-in":
+        variants = [
+            "Taç çizgisinde oyun yeniden başlıyor.",
+            "Kenarda bekleyiş bitti, taçla oyun tekrar akıyor.",
+            "Top çizgiden oyuna dönüyor, yerleşim hızla kuruluyor.",
+        ]
+        event_sentence = variants[sum(ord(ch) for ch in style) % len(variants)]
+    elif label == "Ball out of play":
+        variants = [
+            "Top oyun alanının dışına çıktı, tempo kısa süreliğine durdu.",
+            "Akış bir anlığına kesildi, top çizginin dışına taşmış durumda.",
+            "Ritim kısa bir an duruyor, top dışarıda kaldı.",
+        ]
+        event_sentence = variants[sum(ord(ch) for ch in style) % len(variants)]
+    elif label == "Match State":
+        variants = [
+            "Sahada oyun akışı yeniden şekilleniyor.",
+            "Takımlar yerleşimi güncelliyor, oyunun yönü yeniden kuruluyor.",
+            "Maçın ritmi yeni bir faza giriyor.",
+        ]
+        event_sentence = variants[sum(ord(ch) for ch in style) % len(variants)]
+    elif desc:
+        event_sentence = desc if desc.endswith((".", "!")) else desc + "."
+    else:
+        event_sentence = f"{label} anı yaşanıyor."
+
+    merged = (event_sentence + " " + state_line).strip()
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", merged) if s.strip()]
+    out = " ".join(sentences[:2]) if sentences else "Oyun akışı tempolu biçimde sürüyor."
+    if _is_repetitive_commentary(out, recent_texts):
+        out = out.replace("Sahada", "Bu bölümde").replace("Top", "Oyun")
+    return out
+
+
+def _sanitize_commentary_text(text: str, item: Dict[str, Any], recent_texts: Optional[List[str]] = None) -> str:
+    recent_texts = recent_texts or []
+    raw = str(text or "").strip()
+    if not raw:
+        return _fallback_commentary_text(item, recent_texts)
+
+    cleaned = raw.replace(" veya ", " ve ").replace(" ya da ", " ve ")
+    cleaned = re.sub(r"\b(muhtemelen|belki|galiba|sanirim|sanırım|olabilir)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"gibi görünüyor", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"top görünmüyor|top görünür değil|net izlenemiyor|görünmüyor", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,")
+
+    banned = [" veya ", " ya da ", "olabilir", "muhtemelen", "belki", "görünmüyor", "net izlenemiyor"]
+    lower = f" {cleaned.lower()} "
+    if any(tok in lower for tok in banned) or not cleaned:
+        return _fallback_commentary_text(item, recent_texts)
+
+    period_sec = _commentary_item_period_sec(item)
+    max_sentences = _commentary_sentence_budget(period_sec)
+    max_words = _commentary_word_budget(period_sec)
+
+    out = _trim_commentary_text(cleaned, max_sentences=max_sentences, max_words=max_words)
+    if not out:
+        return _fallback_commentary_text(item, recent_texts)
+    if _is_repetitive_commentary(out, recent_texts):
+        return _fallback_commentary_text(item, recent_texts)
+    if not out.endswith((".", "!")):
+        out += "."
+    return out
+
+
+def _commentary_item_period_sec(item: Dict[str, Any]) -> float:
+    window = item.get("window") if isinstance(item, dict) else None
+    window = window if isinstance(window, dict) else {}
+    duration = window.get("duration_sec", item.get("segment_duration_sec", 10.0))
+    try:
+        return max(4.0, float(duration or 10.0))
+    except Exception:
+        return 10.0
+
+
+def _commentary_sentence_budget(period_sec: float) -> int:
+    return 1 if float(period_sec) <= 18.0 else 2
+
+
+def _commentary_word_budget(period_sec: float) -> int:
+    return max(7, min(22, int(round(float(period_sec) * 0.6))))
+
+
+def _trim_commentary_text(text: str, *, max_sentences: int, max_words: int) -> str:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(text or "").strip()) if s.strip()]
+    if not sentences:
+        return ""
+    clipped = " ".join(sentences[: max(1, int(max_sentences))]).strip()
+    words = clipped.split()
+    if len(words) > int(max_words):
+        clipped = " ".join(words[: int(max_words)]).strip(" ,")
+    clipped = clipped.strip()
+    clipped = re.sub(r"\s+", " ", clipped)
+    clipped = clipped.strip(" ,")
+    clipped = re.sub(r"[,:;]+$", "", clipped)
+    return clipped
+
+
+def _build_commentary_items(
+    *,
+    events: List[Dict[str, Any]],
+    action_events: List[Dict[str, Any]],
+    calibration_events: List[Dict[str, Any]],
+    possession_events: List[Dict[str, Any]],
+    calibration_frames: List[Dict[str, Any]],
+    calibration_frame_times: List[float],
+    jersey_by_track: Dict[int, Dict[str, Any]],
+    track_id_remap: Dict[int, int],
+    cfg: FullPipelineConfig,
+) -> List[Dict[str, Any]]:
+    max_events = int(getattr(cfg, "commentary_max_events", 30) or 30)
+    segment_sec = max(10.0, float(getattr(cfg, "commentary_segment_sec", 30.0) or 30.0))
+
+    anchors: List[Tuple[float, int, Dict[str, Any]]] = []
+
+    for e in action_events:
+        try:
+            anchors.append((float(e.get("t", 0.0)), 0, e))
+        except Exception:
+            continue
+
+    for e in calibration_events:
+        try:
+            anchors.append((float(e.get("t", 0.0)), 1, e))
+        except Exception:
+            continue
+
+    last_pos_t = -1e9
+    pos_gap_sec = min(8.0, max(3.0, segment_sec * 0.35))
+    for e in possession_events:
+        try:
+            tt = float(e.get("t", 0.0))
+        except Exception:
+            continue
+        if tt - last_pos_t >= pos_gap_sec:
+            anchors.append((tt, 2, e))
+            last_pos_t = tt
+
+    timeline_end = 0.0
+    if calibration_frame_times:
+        timeline_end = float(calibration_frame_times[-1])
+    elif events:
+        try:
+            timeline_end = max(float(e.get("t", 0.0) or 0.0) for e in events)
+        except Exception:
+            timeline_end = 0.0
+
+    anchors.sort(key=lambda item: (item[0], item[1]))
+
+    chosen: List[Tuple[float, float, float, int, Dict[str, Any]]] = []
+    if timeline_end <= 0.0 and anchors:
+        try:
+            timeline_end = max(float(a[0]) for a in anchors)
+        except Exception:
+            timeline_end = 0.0
+
+    if timeline_end <= 0.0:
+        timeline_end = float(segment_sec)
+
+    total_segments = max(1, int(np.ceil(float(timeline_end) / float(segment_sec))))
+    for seg_idx in range(total_segments):
+        seg_start = float(seg_idx) * float(segment_sec)
+        seg_end = min(float(timeline_end), seg_start + float(segment_sec))
+        if seg_end <= seg_start:
+            seg_end = seg_start + float(segment_sec)
+
+        candidates = [(tt, prio, e) for tt, prio, e in anchors if seg_start <= tt < seg_end]
+        if candidates:
+            best_t, best_prio, best_event = sorted(
+                candidates,
+                key=lambda item: (
+                    int(item[1]),
+                    -float(item[2].get("confidence", 0.0) or 0.0),
+                    abs(float(item[0]) - ((seg_start + seg_end) * 0.5)),
+                ),
+            )[0]
+        else:
+            best_t = float(seg_start + ((seg_end - seg_start) * 0.5))
+            best_prio = 3
+            best_event = {
+                "t": float(best_t),
+                "source": "state_window",
+                "label": "Match State",
+                "description_tr": "Oyun akışı bu bölümde sürüyor.",
+                "confidence": 0.5,
+            }
+
+        chosen.append((float(seg_start), float(seg_end), float(best_t), int(best_prio), best_event))
+
+    chosen = chosen[: max(1, max_events)]
+
+    items_in: List[Dict[str, Any]] = []
+    for seg_start, seg_end, event_t, _prio, ae in chosen:
+        actor_tid: Optional[int] = None
+        if possession_events:
+            actor_tid = _assign_actor_track_id_to_action(
+                action_t=float(event_t),
+                possession_events=possession_events,
+                max_age_sec=float(getattr(cfg, "commentary_possession_max_age_sec", 8.0)),
+            )
+
+        actor_info = jersey_by_track.get(int(actor_tid), {}) if actor_tid is not None else {}
+        actor_jersey = actor_info.get("jersey_number") if actor_info else None
+        actor_team = actor_info.get("team_id") if actor_info else None
+
+        items_in.append(
+            {
+                "t": float(seg_start),
+                "speech_t": float(seg_start),
+                "timecode": _timecode_mmss(float(seg_start)),
+                "event_t": float(event_t),
+                "event_timecode": _timecode_mmss(float(event_t)),
+                "segment_duration_sec": round(float(seg_end - seg_start), 3),
+                "window": {
+                    "start_t": round(float(seg_start), 3),
+                    "end_t": round(float(seg_end), 3),
+                    "start_timecode": _timecode_mmss(float(seg_start)),
+                    "end_timecode": _timecode_mmss(float(seg_end)),
+                    "duration_sec": round(float(seg_end - seg_start), 3),
+                },
+                "event_label": str(ae.get("label") or ae.get("type") or "Match State"),
+                "event_confidence": float(ae.get("confidence", 0.0) or 0.0),
+                "event_source": str(ae.get("source") or "unknown"),
+                "description_tr": str(ae.get("description_tr") or ""),
+                "actor_track_id": int(actor_tid) if actor_tid is not None else None,
+                "actor_jersey_number": actor_jersey,
+                "actor_team_id": actor_team,
+                "match_state": _summarize_calibration_window(
+                    action_t=float(event_t),
+                    calibration_frames=calibration_frames,
+                    calibration_times=calibration_frame_times,
+                    calibration_events=calibration_events,
+                    possession_events=possession_events,
+                    jersey_by_track=jersey_by_track,
+                    track_id_remap=track_id_remap,
+                    window_sec=float(getattr(cfg, "commentary_context_window_sec", 12.0) or 12.0),
+                    stride_sec=float(getattr(cfg, "commentary_context_stride_sec", 1.0) or 1.0),
+                    max_samples=int(getattr(cfg, "commentary_context_max_samples", 9) or 9),
+                ),
+            }
+        )
+
+    return items_in
 
 
 def _extract_json_array_best_effort(raw: str) -> Optional[str]:
@@ -511,6 +1065,326 @@ def _assign_actor_track_id_to_action(
     if float(action_t) - float(best_t) > float(max_age_sec):
         return None
     return int(best_id)
+
+
+def _load_calibration_frames_jsonl(path: Optional[str]) -> Tuple[List[Dict[str, Any]], List[float]]:
+    frames: List[Dict[str, Any]] = []
+    times: List[float] = []
+    p = str(path or "").strip()
+    if not p or not os.path.isfile(p):
+        return frames, times
+
+    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = str(line or "").strip()
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+                tt = float(obj.get("t", 0.0) or 0.0)
+            except Exception:
+                continue
+            frames.append(obj)
+            times.append(tt)
+
+    return frames, times
+
+
+def _lane_label(x: float) -> str:
+    if x <= -14.0:
+        return "sol kanat"
+    if x >= 14.0:
+        return "sağ kanat"
+    return "merkez"
+
+
+def _band_label(y: float) -> str:
+    if y <= -18.0:
+        return "savunmadan çıkış bölgesi"
+    if y >= 18.0:
+        return "hücum bölgesi"
+    return "orta saha"
+
+
+def _is_penalty_area_zone(x: float, y: float) -> bool:
+    return abs(float(x)) <= 20.0 and abs(float(y)) >= 24.0
+
+
+def _compact_event_for_commentary(e: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key in (
+        "t",
+        "timecode",
+        "type",
+        "label",
+        "source",
+        "description_tr",
+        "player_track_id",
+        "from_player_track_id",
+        "jersey_number",
+        "from_jersey_number",
+        "confidence",
+    ):
+        if key in e:
+            out[key] = e.get(key)
+    return out
+
+
+def _summarize_calibration_window(
+    *,
+    action_t: float,
+    calibration_frames: List[Dict[str, Any]],
+    calibration_times: List[float],
+    calibration_events: List[Dict[str, Any]],
+    possession_events: List[Dict[str, Any]],
+    jersey_by_track: Dict[int, Dict[str, Any]],
+    track_id_remap: Dict[int, int],
+    window_sec: float,
+    stride_sec: float,
+    max_samples: int,
+) -> Dict[str, Any]:
+    if not calibration_frames or not calibration_times:
+        start_t = max(0.0, float(action_t) - float(window_sec) / 2.0)
+        end_t = max(start_t, float(action_t) + float(window_sec) / 2.0)
+        return {
+            "window": {
+                "start_t": round(start_t, 3),
+                "end_t": round(end_t, 3),
+            },
+            "frame_samples": [],
+            "state_summary": {
+                "ball_progression": "kalibrasyon kare verisi yok",
+                "pressure_level": "bilinmiyor",
+                "state_tags": [],
+            },
+            "calibration_events": [
+                _compact_event_for_commentary(e)
+                for e in calibration_events
+                if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
+            ][:6],
+            "possession_events": [
+                _compact_event_for_commentary(e)
+                for e in possession_events
+                if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
+            ][:6],
+        }
+
+    half_window = max(2.0, float(window_sec) / 2.0)
+    start_t = max(0.0, float(action_t) - half_window)
+    end_t = max(start_t, float(action_t) + half_window)
+
+    left = bisect_left(calibration_times, start_t)
+    right = bisect_right(calibration_times, end_t)
+    indices = list(range(left, right))
+
+    if not indices:
+        nearest = min(max(0, bisect_left(calibration_times, float(action_t))), len(calibration_times) - 1)
+        indices = [nearest]
+
+    stride = max(0.25, float(stride_sec))
+    desired_ts: List[float] = []
+    cur = start_t
+    while cur <= end_t + 1e-6:
+        desired_ts.append(round(cur, 3))
+        cur += stride
+    desired_ts.append(round(float(action_t), 3))
+
+    selected: List[int] = []
+    for tt in desired_ts:
+        idx = bisect_left(calibration_times, tt)
+        cand: List[int] = []
+        if idx < len(calibration_times):
+            cand.append(idx)
+        if idx > 0:
+            cand.append(idx - 1)
+        if not cand:
+            continue
+        best = min(cand, key=lambda ii: abs(float(calibration_times[ii]) - float(tt)))
+        if best < left or best >= right:
+            continue
+        if best not in selected:
+            selected.append(best)
+
+    if not selected:
+        selected = indices[:]
+
+    selected.sort()
+    max_keep = max(3, int(max_samples))
+    if len(selected) > max_keep:
+        pos = np.linspace(0, len(selected) - 1, num=max_keep)
+        selected = sorted({selected[min(len(selected) - 1, max(0, int(round(x))))] for x in pos})
+
+    frame_samples: List[Dict[str, Any]] = []
+    ball_points: List[Tuple[float, float]] = []
+    lane_history: List[str] = []
+    band_history: List[str] = []
+    near_ball_counts: List[int] = []
+    penalty_hits = 0
+    focus_players: Dict[int, Dict[str, Any]] = {}
+
+    for idx in selected:
+        frame = calibration_frames[idx]
+        try:
+            frame_idx = int(frame.get("frame_idx", 0) or 0)
+            tt = float(frame.get("t", 0.0) or 0.0)
+        except Exception:
+            continue
+
+        data = frame.get("data") if isinstance(frame, dict) else None
+        data = data if isinstance(data, dict) else {}
+        ball = data.get("ball") if isinstance(data, dict) else None
+        players = data.get("players") if isinstance(data, dict) else None
+        players = players if isinstance(players, list) else []
+
+        sample: Dict[str, Any] = {
+            "t": round(tt, 3),
+            "timecode": _timecode_mmss(tt),
+            "frame_idx": frame_idx,
+            "player_count": int(len(players)),
+        }
+
+        if isinstance(ball, dict) and isinstance(ball.get("world_xy"), (list, tuple)) and len(ball.get("world_xy")) >= 2:
+            try:
+                bx = float(ball["world_xy"][0])
+                by = float(ball["world_xy"][1])
+                lane = _lane_label(bx)
+                band = _band_label(by)
+                in_box = _is_penalty_area_zone(bx, by)
+                ball_points.append((bx, by))
+                lane_history.append(lane)
+                band_history.append(band)
+                if in_box:
+                    penalty_hits += 1
+
+                nearby: List[Tuple[float, Dict[str, Any]]] = []
+                for p in players:
+                    try:
+                        pxy = p.get("world_xy")
+                        if not isinstance(pxy, (list, tuple)) or len(pxy) < 2:
+                            continue
+                        px = float(pxy[0])
+                        py = float(pxy[1])
+                        dist = float(np.sqrt((bx - px) ** 2 + (by - py) ** 2))
+                        track_id_raw = int(p.get("track_id", 0) or 0)
+                        track_id = _resolve_track_id_remap(track_id_raw, track_id_remap) if track_id_raw > 0 else track_id_raw
+                        info = jersey_by_track.get(int(track_id), {}) if track_id > 0 else {}
+                        team_id = p.get("team_id")
+                        if team_id is None and info:
+                            team_id = info.get("team_id")
+                        nearby.append(
+                            (
+                                dist,
+                                {
+                                    "track_id": int(track_id) if track_id > 0 else track_id_raw,
+                                    "jersey_number": info.get("jersey_number") if info else None,
+                                    "team_id": team_id,
+                                    "distance_to_ball_m": round(dist, 2),
+                                },
+                            )
+                        )
+                    except Exception:
+                        continue
+
+                nearby.sort(key=lambda item: item[0])
+                near_cnt = sum(1 for dist, _ in nearby if dist <= 8.0)
+                near_ball_counts.append(int(near_cnt))
+                nearest_players = [entry for _dist, entry in nearby[:4]]
+                for entry in nearest_players:
+                    tid = int(entry.get("track_id") or 0)
+                    if tid > 0 and tid not in focus_players:
+                        focus_players[tid] = entry
+
+                sample["ball"] = {
+                    "world_xy": [round(bx, 2), round(by, 2)],
+                    "lane": lane,
+                    "band": band,
+                    "penalty_area_proximity": bool(in_box),
+                    "nearby_pressure_count": int(near_cnt),
+                    "nearest_players": nearest_players,
+                }
+            except Exception:
+                sample["ball"] = None
+        else:
+            sample["ball"] = None
+
+        frame_samples.append(sample)
+
+    progression = "topun konumu net izlenemiyor"
+    if len(ball_points) >= 2:
+        sx, sy = ball_points[0]
+        ex, ey = ball_points[-1]
+        dx = ex - sx
+        dy = ey - sy
+        if abs(dx) < 4.0 and abs(dy) < 4.0:
+            progression = "top dar bir alanda dolaşıyor"
+        else:
+            move_parts: List[str] = []
+            if _lane_label(sx) != _lane_label(ex):
+                move_parts.append(f"{_lane_label(sx)}dan {_lane_label(ex)}e geçiş var")
+            elif abs(dx) >= 5.0:
+                move_parts.append(f"top {_lane_label(ex)} koridorunda taşınıyor")
+            if dy >= 7.0:
+                move_parts.append("top ileri doğru taşınıyor")
+            elif dy <= -7.0:
+                move_parts.append("top geriye veya savunma yönüne dönüyor")
+            if not move_parts:
+                move_parts.append("topun yönü sık sık değişiyor")
+            progression = ", ".join(move_parts)
+
+    avg_pressure = float(sum(near_ball_counts)) / float(len(near_ball_counts)) if near_ball_counts else 0.0
+    pressure_level = "düşük"
+    if avg_pressure >= 4.0:
+        pressure_level = "yüksek"
+    elif avg_pressure >= 2.0:
+        pressure_level = "orta"
+
+    state_tags: List[str] = []
+    if penalty_hits > 0:
+        state_tags.append("ceza sahası çevresi")
+    if "sol kanat" in lane_history or "sağ kanat" in lane_history:
+        state_tags.append("kanat kullanımı")
+    if "merkez" in lane_history:
+        state_tags.append("merkez bağlantısı")
+    if pressure_level == "yüksek":
+        state_tags.append("yoğun baskı")
+    window_possession = [
+        _compact_event_for_commentary(e)
+        for e in possession_events
+        if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
+    ][:8]
+    if len(window_possession) >= 3:
+        state_tags.append("topa sahip olma değişimleri")
+
+    window_calibration = [
+        _compact_event_for_commentary(e)
+        for e in calibration_events
+        if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
+    ][:8]
+
+    start_frame = int(frame_samples[0].get("frame_idx", 0)) if frame_samples else None
+    end_frame = int(frame_samples[-1].get("frame_idx", 0)) if frame_samples else None
+    return {
+        "window": {
+            "start_t": round(start_t, 3),
+            "end_t": round(end_t, 3),
+            "start_timecode": _timecode_mmss(start_t),
+            "end_timecode": _timecode_mmss(end_t),
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "sample_stride_sec": float(stride),
+        },
+        "state_summary": {
+            "ball_progression": progression,
+            "ball_regions": list(dict.fromkeys(lane_history + band_history))[:6],
+            "pressure_level": pressure_level,
+            "avg_nearby_pressure_count": round(avg_pressure, 2),
+            "state_tags": state_tags,
+            "focus_players": list(focus_players.values())[:6],
+        },
+        "frame_samples": frame_samples,
+        "calibration_events": window_calibration,
+        "possession_events": window_possession,
+    }
 
 
 def _mix_commentary_audio_into_video(
@@ -658,6 +1532,18 @@ def _mix_commentary_audio_into_video(
             return None
 
 
+def _audio_duration_sec(audio_path: str) -> float:
+    try:
+        with wave.open(str(audio_path), "rb") as wf:
+            frames = int(wf.getnframes())
+            rate = int(wf.getframerate())
+            if rate <= 0:
+                return 0.0
+            return max(0.0, float(frames) / float(rate))
+    except Exception:
+        return 0.0
+
+
 def _jersey_crop_from_player_bbox(
     frame_bgr: np.ndarray,
     *,
@@ -730,6 +1616,72 @@ def _normalize_base_url(url: str) -> str:
     if not u:
         return ""
     return u[:-1] if u.endswith("/") else u
+
+
+def _normalize_model_name_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _fetch_qwen_vl_models(base_url: str, timeout_sec: float = 10.0) -> List[str]:
+    if httpx is None:
+        return []
+
+    base = _normalize_base_url(base_url)
+    if not base:
+        return []
+
+    try:
+        with httpx.Client(timeout=float(timeout_sec)) as client:
+            resp = client.get(base + "/v1/models")
+        if int(resp.status_code) >= 400:
+            return []
+        obj = resp.json()
+    except Exception:
+        return []
+
+    candidates: List[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    data = []
+    if isinstance(obj, dict):
+        raw_data = obj.get("data")
+        if isinstance(raw_data, list):
+            data.extend(raw_data)
+        raw_models = obj.get("models")
+        if isinstance(raw_models, list):
+            data.extend(raw_models)
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        add_candidate(item.get("id"))
+        add_candidate(item.get("model"))
+        add_candidate(item.get("name"))
+
+    return candidates
+
+
+def _resolve_qwen_vl_model_name(base_url: str, preferred_model: str) -> str:
+    preferred = str(preferred_model or "").strip()
+    models = _fetch_qwen_vl_models(base_url=base_url)
+    if not models:
+        return preferred or "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
+
+    if preferred:
+        pref_norm = _normalize_model_name_token(preferred)
+        for candidate in models:
+            cand_norm = _normalize_model_name_token(candidate)
+            if candidate == preferred or cand_norm == pref_norm or (pref_norm and pref_norm in cand_norm):
+                return candidate
+
+    return str(models[0])
 
 
 def _qwen_vl_openai_compatible(
@@ -1106,6 +2058,10 @@ def infer_jersey_numbers_from_tracking(
     jersey_final: Dict[int, str] = {}
     jersey_conf: Dict[int, float] = {}
     jersey_source: Dict[int, int] = {}
+    resolved_qwen_model = _resolve_qwen_vl_model_name(
+        base_url=str(getattr(cfg, "qwen_vl_url", "") or ""),
+        preferred_model=str(getattr(cfg, "qwen_vl_model", "") or "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+    )
 
     done = 0
     total_est = int(len(keep_tracks) * max_attempts)
@@ -1244,7 +2200,7 @@ def infer_jersey_numbers_from_tracking(
             jersey, raw = _qwen_vl_ask_jersey_number(
                 crop_bgr=crop,
                 qwen_url=str(cfg.qwen_vl_url),
-                model=str(getattr(cfg, "qwen_vl_model", "") or "qwen3vl8b"),
+                model=str(resolved_qwen_model or "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
                 prompt=str(getattr(cfg, "jersey_prompt", "") or ""),
             )
             if raw:
@@ -1521,6 +2477,195 @@ def _ffmpeg_exe() -> Optional[str]:
     return None
 
 
+def _docker_exe() -> Optional[str]:
+    return _which("docker")
+
+
+def _docker_container_state(container_id: str) -> Tuple[Optional[str], Optional[str]]:
+    docker_bin = _docker_exe()
+    if not docker_bin:
+        return None, "docker executable not found"
+
+    cid = str(container_id or "").strip()
+    if not cid:
+        return None, "container id is empty"
+
+    cmd = [docker_bin, "inspect", "-f", "{{.State.Status}}", cid]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except Exception as e:
+        return None, str(e)
+
+    state = str((res.stdout or "").strip()).lower()
+    return (state or None), None
+
+
+def _wait_for_http_ready(
+    *,
+    base_url: str,
+    timeout_sec: float = 60.0,
+    paths: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if httpx is None:
+        return {"ok": False, "error": "httpx unavailable"}
+
+    base = _normalize_base_url(base_url)
+    if not base:
+        return {"ok": False, "error": "base url is empty"}
+
+    targets = paths or ["/v1/models", "/"]
+    deadline = time.time() + max(1.0, float(timeout_sec))
+    last_error: Optional[str] = None
+
+    while time.time() <= deadline:
+        for path in targets:
+            try:
+                with httpx.Client(timeout=5.0) as client:
+                    resp = client.get(base + path)
+                if 200 <= int(resp.status_code) < 500:
+                    return {"ok": True, "url": base + path, "status_code": int(resp.status_code)}
+            except Exception as e:
+                last_error = str(e)
+        time.sleep(0.5)
+
+    return {"ok": False, "error": last_error or "timeout waiting for http readiness"}
+
+
+def _wait_for_docker_container_state(
+    *,
+    container_id: str,
+    desired_states: List[str],
+    timeout_sec: float = 60.0,
+    poll_sec: float = 0.5,
+) -> Dict[str, Any]:
+    wanted = {str(x or "").strip().lower() for x in desired_states if str(x or "").strip()}
+    deadline = time.time() + max(1.0, float(timeout_sec))
+    last_state: Optional[str] = None
+    last_error: Optional[str] = None
+
+    while time.time() <= deadline:
+        state, err = _docker_container_state(container_id)
+        last_state = state
+        last_error = err
+        if state in wanted:
+            return {
+                "ok": True,
+                "state": state,
+            }
+        time.sleep(max(0.1, float(poll_sec)))
+
+    return {
+        "ok": False,
+        "state": last_state,
+        "error": last_error or f"timeout waiting for states {sorted(wanted)}",
+    }
+
+
+def _set_qwen_vl_container_state(
+    *,
+    cfg: FullPipelineConfig,
+    action: str,
+    progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
+) -> Dict[str, Any]:
+    """Best-effort Docker lifecycle control for the external VL server."""
+    info: Dict[str, Any] = {
+        "action": str(action),
+        "enabled": False,
+    }
+
+    manage = bool(getattr(cfg, "qwen_vl_manage_container", False))
+    cid = str(getattr(cfg, "qwen_vl_container_id", "") or "").strip()
+    info["enabled"] = manage
+    info["container_id"] = cid
+    if not manage:
+        info["skipped"] = "container management disabled"
+        return info
+    if not cid:
+        info["skipped"] = "container id not configured"
+        return info
+
+    docker_bin = _docker_exe()
+    if not docker_bin:
+        info["error"] = "docker executable not found"
+        return info
+
+    before, before_err = _docker_container_state(cid)
+    info["state_before"] = before
+    if before_err:
+        info["state_before_error"] = before_err
+
+    desired = str(action or "").strip().lower()
+    if desired not in ("start", "stop"):
+        info["error"] = f"unsupported action: {desired}"
+        return info
+
+    if desired == "start" and before == "running":
+        info["changed"] = False
+        info["state_after"] = before
+        ready = _wait_for_http_ready(
+            base_url=str(getattr(cfg, "qwen_vl_url", "") or ""),
+            timeout_sec=float(getattr(cfg, "qwen_vl_ready_timeout_sec", 60.0) or 60.0),
+        )
+        info["http_ready"] = ready
+        if not bool(ready.get("ok")):
+            info["error"] = str(ready.get("error") or "qwen vl http server not ready")
+        return info
+    if desired == "stop" and before in ("exited", "created", "dead"):
+        info["changed"] = False
+        info["state_after"] = before
+        return info
+
+    if progress_cb is not None:
+        try:
+            msg = "Qwen-VL container başlatılıyor" if desired == "start" else "Qwen-VL container durduruluyor"
+            progress_cb("qwen_vl_container", 0, 1, msg)
+        except Exception:
+            pass
+
+    cmd = [docker_bin, desired, cid]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        info["stdout"] = str(res.stdout or "").strip()
+        info["stderr"] = str(res.stderr or "").strip()
+        info["changed"] = True
+    except Exception as e:
+        info["error"] = str(e)
+        return info
+
+    after, after_err = _docker_container_state(cid)
+    info["state_after"] = after
+    if after_err:
+        info["state_after_error"] = after_err
+
+    wait_states = ["running"] if desired == "start" else ["exited", "dead", "created"]
+    waited = _wait_for_docker_container_state(container_id=cid, desired_states=wait_states)
+    info["wait"] = waited
+    if waited.get("state"):
+        info["state_after"] = waited.get("state")
+    if not bool(waited.get("ok")):
+        info["error"] = str(waited.get("error") or "container state transition not confirmed")
+        return info
+
+    if desired == "start":
+        ready = _wait_for_http_ready(
+            base_url=str(getattr(cfg, "qwen_vl_url", "") or ""),
+            timeout_sec=float(getattr(cfg, "qwen_vl_ready_timeout_sec", 60.0) or 60.0),
+        )
+        info["http_ready"] = ready
+        if not bool(ready.get("ok")):
+            info["error"] = str(ready.get("error") or "qwen vl http server not ready")
+            return info
+
+    if progress_cb is not None:
+        try:
+            msg = "Qwen-VL container hazır" if desired == "start" else "Qwen-VL container durdu"
+            progress_cb("qwen_vl_container", 1, 1, msg)
+        except Exception:
+            pass
+
+    return info
+
+
 def _write_tracks_csv_with_jersey(
     *,
     in_csv_path: str,
@@ -1646,11 +2791,19 @@ def run_tracking_reid_osnet(
     # Optional: run jersey inference during tracking (best-effort)
     jersey_json_path = str(Path(out_dir) / f"tracking_{run_id}.jersey.json")
     qwen_url = ""
+    qwen_model = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
     if cfg is not None:
         try:
             qwen_url = str(getattr(cfg, "qwen_vl_url", "") or "").strip()
         except Exception:
             qwen_url = ""
+        try:
+            qwen_model = _resolve_qwen_vl_model_name(
+                base_url=qwen_url,
+                preferred_model=str(getattr(cfg, "qwen_vl_model", "") or "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            )
+        except Exception:
+            qwen_model = str(getattr(cfg, "qwen_vl_model", "") or "Qwen3VL-8B-Instruct-Q4_K_M.gguf")
 
     jersey_cmd_enabled = False
     jersey_args: List[str] = []
@@ -1667,7 +2820,7 @@ def run_tracking_reid_osnet(
             "--jersey_qwen_url",
             qwen_url,
             "--jersey_model",
-            str(getattr(cfg, "qwen_vl_model", "qwen3vl8b")),
+            str(qwen_model or "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
             "--jersey_prompt",
             str(getattr(cfg, "jersey_prompt", "") or ""),
             "--jersey_min_frame_gap",
@@ -2484,11 +3637,25 @@ def run_full_pipeline(
         "run_commentary": bool(getattr(cfg, "run_commentary", True)),
         "calibration": {
             "conf_thres": float(cfg.calibration_conf_thres),
-            "write_frames_jsonl": bool(cfg.calibration_write_frames_jsonl),
+            "write_frames_jsonl": bool(cfg.calibration_write_frames_jsonl or bool(getattr(cfg, "run_commentary", True))),
             "frames_stride": int(cfg.calibration_frames_stride),
             "yolo_frame_window": int(cfg.calibration_yolo_frame_window),
             "yolo_selection_mode": str(cfg.calibration_yolo_selection_mode),
             "interpolation_mode": str(cfg.calibration_interpolation_mode),
+        },
+        "commentary": {
+            "llm_backend": str(getattr(cfg, "commentary_llm_backend", "ollama") or "ollama"),
+            "llm_url": str(getattr(cfg, "commentary_llm_url", "http://localhost:11434/") or "http://localhost:11434/"),
+            "llm_model": str(getattr(cfg, "commentary_llm_model", "qwen3.5:9b") or "qwen3.5:9b"),
+            "flush_gpu_before_llm": bool(getattr(cfg, "commentary_flush_gpu_before_llm", True)),
+            "context_window_sec": float(getattr(cfg, "commentary_context_window_sec", 12.0) or 12.0),
+            "context_stride_sec": float(getattr(cfg, "commentary_context_stride_sec", 1.0) or 1.0),
+            "context_max_samples": int(getattr(cfg, "commentary_context_max_samples", 9) or 9),
+        },
+        "qwen_vl": {
+            "manage_container": bool(getattr(cfg, "qwen_vl_manage_container", False)),
+            "container_id": str(getattr(cfg, "qwen_vl_container_id", "") or ""),
+            "stop_before_commentary": bool(getattr(cfg, "qwen_vl_stop_before_commentary", True)),
         },
     }
 
@@ -2516,6 +3683,8 @@ def run_full_pipeline(
     calibration_events_json_path: Optional[str] = None
     calibration_frames_jsonl_path: Optional[str] = None
     calibration_events: List[Dict[str, Any]] = []
+    calibration_frames: List[Dict[str, Any]] = []
+    calibration_frame_times: List[float] = []
     calibration_runtime_config: Optional[Dict[str, Any]] = None
 
     if bool(getattr(cfg, "run_calibration", True)):
@@ -2525,7 +3694,7 @@ def run_full_pipeline(
             out_map = str(Path(out_dir) / f"map_{run_id}.mp4")
             out_events = str(Path(out_dir) / f"calibration_events_{run_id}.json")
             out_frames = None
-            if bool(getattr(cfg, "calibration_write_frames_jsonl", False)):
+            if bool(getattr(cfg, "calibration_write_frames_jsonl", False)) or bool(getattr(cfg, "run_commentary", True)):
                 out_frames = str(Path(out_dir) / f"calibration_frames_{run_id}.jsonl")
             calib_res = run_calibration_pipeline(
                 video_path=segment_path,
@@ -2545,6 +3714,11 @@ def run_full_pipeline(
                 calibration_frames_jsonl_path = None
             if calibration_frames_jsonl_path and not os.path.isfile(str(calibration_frames_jsonl_path)):
                 calibration_frames_jsonl_path = None
+            if calibration_frames_jsonl_path and bool(getattr(cfg, "run_commentary", True)):
+                try:
+                    calibration_frames, calibration_frame_times = _load_calibration_frames_jsonl(calibration_frames_jsonl_path)
+                except Exception:
+                    calibration_frames, calibration_frame_times = [], []
 
             # Import calibration events into the unified manifest event list.
             if calibration_events_json_path and os.path.isfile(calibration_events_json_path):
@@ -2603,6 +3777,14 @@ def run_full_pipeline(
     tracks_csv_path: Optional[str] = None
     tracks_csv_raw_path: Optional[str] = None
     tracking_res: Optional[Dict[str, Any]] = None
+    qwen_vl_container_events: List[Dict[str, Any]] = []
+
+    if bool(cfg.run_jersey_number_recognition):
+        try:
+            evt = _set_qwen_vl_container_state(cfg=cfg, action="start", progress_cb=progress_cb)
+            qwen_vl_container_events.append(evt)
+        except Exception:
+            pass
 
     if cfg.run_tracking:
         emit("tracking", 0, 1, "Tracking başlıyor")
@@ -2752,6 +3934,8 @@ def run_full_pipeline(
     commentary_output_path: Optional[str] = None
     commentary_audio_manifest_path: Optional[str] = None
     commentary_video_path: Optional[str] = None
+    commentary_gpu_cleanup: Optional[Dict[str, Any]] = None
+    commentary_error: Optional[str] = None
     # Product output: should be a clean (no boxes) video, optionally with commentary audio.
     product_video_path: str = segment_path
 
@@ -2790,47 +3974,32 @@ def run_full_pipeline(
                 if str(e.get("source")) == "tracking" and str(e.get("type")) in ("possession_start", "possession_change")
             ]
 
-            if action_events:
-                max_events = int(getattr(cfg, "commentary_max_events", 30) or 30)
-                action_events = sorted(action_events, key=lambda e: float(e.get("t", 0.0)))[: max(1, max_events)]
-
-                items_in: List[Dict[str, Any]] = []
-                for ae in action_events:
-                    try:
-                        t = float(ae.get("t", 0.0))
-                    except Exception:
-                        continue
-
-                    actor_tid: Optional[int] = None
-                    if possession_events:
-                        actor_tid = _assign_actor_track_id_to_action(
-                            action_t=t,
-                            possession_events=possession_events,
-                            max_age_sec=float(getattr(cfg, "commentary_possession_max_age_sec", 8.0)),
+            if action_events or calibration_events or possession_events:
+                if bool(getattr(cfg, "qwen_vl_stop_before_commentary", True)):
+                    evt = _set_qwen_vl_container_state(cfg=cfg, action="stop", progress_cb=progress_cb)
+                    qwen_vl_container_events.append(evt)
+                    state_after = str(evt.get("state_after") or "").strip().lower()
+                    if evt.get("error") or state_after not in ("exited", "dead", "created"):
+                        raise RuntimeError(
+                            "Qwen-VL container stop could not be confirmed before Ollama commentary generation"
                         )
 
-                    actor_info = jersey_by_track.get(int(actor_tid), {}) if actor_tid is not None else {}
-                    actor_jersey = None
-                    actor_team = None
-                    try:
-                        if actor_info:
-                            actor_jersey = actor_info.get("jersey_number")
-                            actor_team = actor_info.get("team_id")
-                    except Exception:
-                        pass
+                if bool(getattr(cfg, "commentary_flush_gpu_before_llm", True)):
+                    emit("commentary_cleanup", 0, 1, "GPU belleği temizleniyor")
+                    commentary_gpu_cleanup = _flush_gpu_vram()
+                    emit("commentary_cleanup", 1, 1, "GPU belleği temizlendi")
 
-                    items_in.append(
-                        {
-                            "t": float(t),
-                            "timecode": _timecode_mmss(float(t)),
-                            "event_label": str(ae.get("label", "")),
-                            "event_confidence": float(ae.get("confidence", 0.0) or 0.0),
-                            "description_tr": str(ae.get("description_tr", "") or ""),
-                            "actor_track_id": int(actor_tid) if actor_tid is not None else None,
-                            "actor_jersey_number": actor_jersey,
-                            "actor_team_id": actor_team,
-                        }
-                    )
+                items_in = _build_commentary_items(
+                    events=events,
+                    action_events=action_events,
+                    calibration_events=calibration_events,
+                    possession_events=possession_events,
+                    calibration_frames=calibration_frames,
+                    calibration_frame_times=calibration_frame_times,
+                    jersey_by_track=jersey_by_track,
+                    track_id_remap=track_id_remap,
+                    cfg=cfg,
+                )
 
                 commentary_input_path = str(Path(out_dir) / f"commentary_input_{run_id}.json")
                 with open(commentary_input_path, "w", encoding="utf-8") as f:
@@ -2846,52 +4015,54 @@ def run_full_pipeline(
                         indent=2,
                     )
 
-                qwen_url = str(getattr(cfg, "qwen_vl_url", "") or "").strip()
-                qwen_model = str(getattr(cfg, "qwen_vl_model", "qwen3vl8b") or "qwen3vl8b").strip()
-                prompt = _build_commentary_prompt(items_in)
-                raw, err = _qwen_text_openai_compatible(base_url=qwen_url, model=qwen_model, prompt=prompt)
-
-                parsed: List[Dict[str, Any]] = []
-                if raw:
-                    try:
-                        extracted = _extract_json_array_best_effort(raw)
-                        parsed = json.loads(extracted if extracted else raw)
-                    except Exception:
-                        parsed = []
-
-                by_t: Dict[float, str] = {}
-                for it in parsed or []:
-                    try:
-                        tt = float(it.get("t"))
-                        txt = str(it.get("text") or "").strip()
-                        if txt:
-                            by_t[tt] = txt
-                    except Exception:
-                        continue
-
+                llm_backend = str(getattr(cfg, "commentary_llm_backend", "ollama") or "ollama").strip()
+                llm_url = str(getattr(cfg, "commentary_llm_url", "http://localhost:11434/") or "http://localhost:11434/").strip()
+                llm_model = str(getattr(cfg, "commentary_llm_model", "qwen3.5:9b") or "qwen3.5:9b").strip()
                 items_out: List[Dict[str, Any]] = []
-                for it in items_in:
-                    tt = float(it.get("t", 0.0))
-                    txt = by_t.get(tt)
-                    if not txt:
-                        # fallback: prefer action_spotting's Turkish description
-                        txt = str(it.get("description_tr") or "").strip()
-                    if not txt:
-                        lbl = str(it.get("event_label") or "aksiyon")
-                        a = it.get("actor_track_id")
-                        txt = f"{lbl}!" if a is None else f"{lbl}! Topu en son kontrol eden oyuncu #{int(a)}."
-                    items_out.append({**it, "text": txt, "commentary_text": txt})
+                item_errors: List[str] = []
+                recent_texts: List[str] = []
+                timeout_sec = float(getattr(cfg, "commentary_llm_timeout_sec", 90.0) or 90.0)
+                total_items = max(1, len(items_in))
+                for idx, it in enumerate(items_in, start=1):
+                    emit("commentary_llm", idx - 1, total_items, f"Yorum üretiliyor ({idx}/{total_items})")
+                    prompt = _build_commentary_item_prompt(it, recent_texts)
+                    raw, err = _request_commentary_text(
+                        base_url=llm_url,
+                        model=llm_model,
+                        prompt=prompt,
+                        backend=llm_backend,
+                        timeout_sec=timeout_sec,
+                    )
+                    txt = _extract_commentary_text_best_effort(str(raw or "")) if raw else None
+                    final_text = _sanitize_commentary_text(str(txt or ""), it, recent_texts)
+                    if err:
+                        item_errors.append(f"{it.get('timecode')}: {err}")
+                    recent_texts.append(final_text)
+                    items_out.append(
+                        {
+                            **it,
+                            "text": final_text,
+                            "commentary_text": final_text,
+                            "llm_raw": str(raw or "")[:1000],
+                            "llm_item_error": err,
+                        }
+                    )
+                emit("commentary_llm", total_items, total_items, "Yorumlar hazır")
 
-                commentary_output_path = str(Path(out_dir) / f"commentary_qwen_{run_id}.json")
+                err = "; ".join(item_errors[:10]) if item_errors else None
+
+                commentary_output_path = str(Path(out_dir) / f"commentary_llm_{run_id}.json")
                 with open(commentary_output_path, "w", encoding="utf-8") as f:
                     json.dump(
                         {
                             "schema_version": "1.0",
                             "run_id": run_id,
                             "created_utc": datetime.utcnow().isoformat() + "Z",
-                            "qwen_url": qwen_url,
-                            "qwen_model": qwen_model,
-                            "qwen_error": err,
+                            "llm_backend": llm_backend,
+                            "llm_url": llm_url,
+                            "llm_model": llm_model,
+                            "llm_error": err,
+                            **({"gpu_cleanup": commentary_gpu_cleanup} if commentary_gpu_cleanup else {}),
                             "items": items_out,
                         },
                         f,
@@ -2914,16 +4085,55 @@ def run_full_pipeline(
 
                         audio_manifest: List[Dict[str, Any]] = []
                         clips: List[Tuple[float, str]] = []
+                        min_audio_gap = max(0.0, float(getattr(cfg, "commentary_min_audio_gap_sec", 0.35) or 0.35))
+                        next_free_t = 0.0
                         for it in items_out:
-                            tt = float(it.get("t", 0.0))
+                            window = it.get("window") if isinstance(it, dict) else None
+                            window = window if isinstance(window, dict) else {}
+                            window_start = float(window.get("start_t", it.get("t", 0.0)) or 0.0)
+                            window_end = float(window.get("end_t", window_start + _commentary_item_period_sec(it)) or (window_start + _commentary_item_period_sec(it)))
+                            tt = float(it.get("speech_t", it.get("t", 0.0)) or 0.0)
                             txt = str(it.get("commentary_text") or "").strip()
                             if not txt:
                                 continue
                             r = ce.synthesize_commentary(text=txt, t_seconds=tt)
-                            audio_manifest.append({**it, **r})
                             ap = r.get("audio_path")
                             if ap:
-                                clips.append((tt, str(ap)))
+                                dur = _audio_duration_sec(str(ap))
+                                allowed_dur = max(3.0, float(window_end) - max(float(window_start), float(tt)) - float(min_audio_gap))
+                                final_txt = txt
+                                if dur > allowed_dur and final_txt:
+                                    shorter = _trim_commentary_text(
+                                        final_txt,
+                                        max_sentences=1,
+                                        max_words=_commentary_word_budget(max(4.0, allowed_dur)),
+                                    )
+                                    if shorter and shorter != final_txt:
+                                        r_retry = ce.synthesize_commentary(text=shorter, t_seconds=tt)
+                                        ap_retry = r_retry.get("audio_path")
+                                        if ap_retry:
+                                            r = r_retry
+                                            ap = ap_retry
+                                            dur = _audio_duration_sec(str(ap_retry))
+                                            final_txt = shorter
+                                scheduled_t = max(float(window_start), max(float(tt), float(next_free_t)))
+                                latest_start = max(float(window_start), float(window_end) - float(dur))
+                                if scheduled_t > latest_start:
+                                    scheduled_t = latest_start
+                                next_free_t = float(scheduled_t) + float(dur) + float(min_audio_gap)
+                                clips.append((scheduled_t, str(ap)))
+                                audio_manifest.append(
+                                    {
+                                        **{**it, "commentary_text": final_txt, "text": final_txt},
+                                        **r,
+                                        "scheduled_t": float(scheduled_t),
+                                        "scheduled_timecode": _timecode_mmss(float(scheduled_t)),
+                                        "audio_duration_sec": float(dur),
+                                        "window_fit_ok": bool((float(scheduled_t) + float(dur)) <= (float(window_end) + 1e-6)),
+                                    }
+                                )
+                            else:
+                                audio_manifest.append({**it, **r})
 
                         commentary_audio_manifest_path = str(Path(out_dir) / f"commentary_audio_{run_id}.json")
                         with open(commentary_audio_manifest_path, "w", encoding="utf-8") as f:
@@ -2951,8 +4161,8 @@ def run_full_pipeline(
                             product_video_path = mixed
                     except Exception:
                         pass
-    except Exception:
-        pass
+    except Exception as e:
+        commentary_error = str(e)
 
     stage_timings_sec["total"] = round(sum(float(v) for v in stage_timings_sec.values()), 3)
 
@@ -2983,6 +4193,9 @@ def run_full_pipeline(
             **({"commentary_audio_manifest_path": commentary_audio_manifest_path} if commentary_audio_manifest_path else {}),
             **({"commentary_video_path": commentary_video_path} if commentary_video_path else {}),
         },
+        **({"commentary_error": commentary_error} if commentary_error else {}),
+        **({"qwen_vl_container_events": qwen_vl_container_events} if qwen_vl_container_events else {}),
+        **({"commentary_gpu_cleanup": commentary_gpu_cleanup} if commentary_gpu_cleanup else {}),
         **({"track_id_remap": track_id_remap} if track_id_remap else {}),
         "jersey_numbers": list(jersey_by_track.values()) if jersey_by_track else [],
         "events": events,
@@ -3011,6 +4224,9 @@ def run_full_pipeline(
         **({"commentary_input_path": commentary_input_path} if commentary_input_path else {}),
         **({"commentary_output_path": commentary_output_path} if commentary_output_path else {}),
         **({"commentary_audio_manifest_path": commentary_audio_manifest_path} if commentary_audio_manifest_path else {}),
+        **({"commentary_error": commentary_error} if commentary_error else {}),
+        **({"qwen_vl_container_events": qwen_vl_container_events} if qwen_vl_container_events else {}),
+        **({"commentary_gpu_cleanup": commentary_gpu_cleanup} if commentary_gpu_cleanup else {}),
         "events_json_path": events_json_path,
         "event_count": len(events),
     }
