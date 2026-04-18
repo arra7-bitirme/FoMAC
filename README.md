@@ -1,4 +1,4 @@
-# FoMAC - Football Match Analysis and Classification
+# FoMAC - Football Match Analysis and Commentary
 
 Futbol maçı analizi ve sınıflandırma için geliştirilmiş yapay zeka tabanlı sistem.
 
@@ -237,9 +237,3 @@ ls ballDataset/data.yaml
 ## 📝 License
 
 Bu proje akademik amaçlarla geliştirilmiştir.
-
-## 📞 İletişim
-
-- **Proje:** FoMAC - Football Match Analysis and Classification
-- **Geliştirici:** Alperen ARRA
-- **Repository:** [arra7-bitirme/FoMAC](https://github.com/arra7-bitirme/FoMAC)
