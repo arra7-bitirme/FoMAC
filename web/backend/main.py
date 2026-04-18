@@ -555,11 +555,19 @@ class RunFullPipelineRequest(BaseModel):
     calibration_yolo_selection_mode: str = "ball_priority"
     calibration_interpolation_mode: str = "linear"
 
-    # action spotting inputs
-    features_path: Optional[str] = None
-    checkpoint_path: Optional[str] = None
+    # action spotting inputs (T-DEED)
+    features_path: Optional[str] = None  # legacy, unused
+    checkpoint_path: Optional[str] = None  # legacy, unused
+    tdeed_repo_dir: Optional[str] = None
+    action_model_name: str = "SoccerNet_big"
+    action_frame_width: int = 398
+    action_frame_height: int = 224
     action_threshold: float = 0.50
     action_nms_window_sec: float = 10.0
+    run_ball_action_spotting: bool = True
+    ball_model_name: str = "SoccerNetBall_challenge2"
+    ball_checkpoint_path: Optional[str] = None
+    ball_action_threshold: float = 0.20
 
     # tracking inputs
     run_tracking: bool = True
@@ -606,9 +614,9 @@ class RunFullPipelineRequest(BaseModel):
     run_commentary: bool = True
     commentary_max_events: int = 30
     commentary_possession_max_age_sec: float = 8.0
-    commentary_llm_backend: str = "ollama"
-    commentary_llm_url: str = "http://localhost:11434/"
-    commentary_llm_model: str = "qwen3.5:9b"
+    commentary_llm_backend: str = "vllm"
+    commentary_llm_url: str = "http://localhost:8001/"
+    commentary_llm_model: str = "nvidia/Qwen3-8B-NVFP4"
     commentary_flush_gpu_before_llm: bool = True
     commentary_context_window_sec: float = 12.0
     commentary_context_stride_sec: float = 1.0
@@ -662,8 +670,16 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         run_action_spotting=bool(req.run_action_spotting),
         features_path=req.features_path,
         checkpoint_path=req.checkpoint_path,
+        tdeed_repo_dir=req.tdeed_repo_dir,
+        action_model_name=str(req.action_model_name),
+        action_frame_width=int(req.action_frame_width),
+        action_frame_height=int(req.action_frame_height),
         action_threshold=float(req.action_threshold),
         action_nms_window_sec=float(req.action_nms_window_sec),
+        run_ball_action_spotting=bool(req.run_ball_action_spotting),
+        ball_model_name=str(req.ball_model_name),
+        ball_checkpoint_path=req.ball_checkpoint_path,
+        ball_action_threshold=float(req.ball_action_threshold),
         run_jersey_number_recognition=bool(req.run_jersey_number_recognition),
         qwen_vl_url=str(req.qwen_vl_url),
         qwen_vl_model=str(req.qwen_vl_model),
@@ -769,6 +785,11 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
             if result.get("tracks_csv_path")
             else {}
         ),
+        **(
+            {"action_spotting_metadata_url": f"http://localhost:8000/api/file?path={requests_quote(result['action_spotting_metadata_path'])}"}
+            if result.get("action_spotting_metadata_path")
+            else {}
+        ),
     }
 
 
@@ -841,8 +862,16 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 run_action_spotting=bool(req.run_action_spotting),
                 features_path=req.features_path,
                 checkpoint_path=req.checkpoint_path,
+                tdeed_repo_dir=req.tdeed_repo_dir,
+                action_model_name=str(req.action_model_name),
+                action_frame_width=int(req.action_frame_width),
+                action_frame_height=int(req.action_frame_height),
                 action_threshold=float(req.action_threshold),
                 action_nms_window_sec=float(req.action_nms_window_sec),
+                run_ball_action_spotting=bool(req.run_ball_action_spotting),
+                ball_model_name=str(req.ball_model_name),
+                ball_checkpoint_path=req.ball_checkpoint_path,
+                ball_action_threshold=float(req.ball_action_threshold),
                 run_jersey_number_recognition=bool(req.run_jersey_number_recognition),
                 qwen_vl_url=str(req.qwen_vl_url),
                 qwen_vl_model=str(req.qwen_vl_model),
@@ -940,6 +969,11 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 **(
                     {"tracks_csv_url": f"http://localhost:8000/api/file?path={requests_quote(result['tracks_csv_path'])}"}
                     if result.get("tracks_csv_path")
+                    else {}
+                ),
+                **(
+                    {"action_spotting_metadata_url": f"http://localhost:8000/api/file?path={requests_quote(result['action_spotting_metadata_path'])}"}
+                    if result.get("action_spotting_metadata_path")
                     else {}
                 ),
             }

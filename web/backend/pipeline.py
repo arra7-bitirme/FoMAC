@@ -25,14 +25,11 @@ try:
 except Exception:  # pragma: no cover
     httpx = None
 
-
 @dataclass
 class FullPipelineConfig:
-    # segment
     start_seconds: float = 0.0
     duration_seconds: Optional[float] = None
 
-    # calibration (must run before tracking)
     run_calibration: bool = True
     calibration_detector_weights: Optional[str] = None
     calibration_kp_weights: Optional[str] = None
@@ -44,24 +41,28 @@ class FullPipelineConfig:
     calibration_yolo_selection_mode: str = "ball_priority"
     calibration_interpolation_mode: str = "linear"
 
-    # tracking
     run_tracking: bool = True
     tracking_device: Optional[str] = None
     tracking_config_path: Optional[str] = None
     detector_weights: Optional[str] = None
     reid_weights: Optional[str] = None
 
-    # action spotting
     run_action_spotting: bool = True
-    features_path: Optional[str] = None
-    checkpoint_path: Optional[str] = None
+    tdeed_repo_dir: Optional[str] = None
+    action_model_name: str = "SoccerNet_big"
+    action_frame_width: int = 398
+    action_frame_height: int = 224
     action_threshold: float = 0.50
     action_nms_window_sec: float = 10.0
+    run_ball_action_spotting: bool = True
+    ball_model_name: str = "SoccerNetBall_challenge2"
+    ball_checkpoint_path: Optional[str] = None
+    ball_action_threshold: float = 0.20
+    features_path: Optional[str] = None
+    checkpoint_path: Optional[str] = None
 
-    # overlay
     overlay_event_window_sec: float = 3.0
 
-    # jersey number recognition (Qwen-VL)
     run_jersey_number_recognition: bool = True
     qwen_vl_url: str = "http://localhost:8080/"
     qwen_vl_model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
@@ -80,32 +81,28 @@ class FullPipelineConfig:
         "* Do not output words.\n\n"
         "Return only the final answer.\n"
     )
-    # 0 or negative means: no cap (process all player tracks)
     jersey_max_tracks: int = 0
     jersey_max_samples_per_track: int = 5
     jersey_min_det_conf: float = 0.55
     jersey_min_box_area: int = 40 * 40
     jersey_min_frame_gap: int = 20
-    # When doing jersey in tracking: query up to this many player tracks per frame.
     jersey_frame_topk: int = 5
-    # Optional: save jersey crops for debugging.
     jersey_crops_dir: Optional[str] = None
-    # Optional: visibility filter to reduce wasted Qwen calls.
     jersey_vis_filter: bool = False
     jersey_vis_min_score: float = 0.12
-    # Prefer doing jersey crops while tracking processes frames (uses in-memory frames; avoids random seeks)
     jersey_in_tracking: bool = True
     jersey_merge_same_number: bool = True
     jersey_merge_min_confidence: float = 0.60
     jersey_merge_max_overlap_frames: int = 5
 
-    # commentary (Qwen text -> TTS -> mix into video)
     run_commentary: bool = True
     commentary_max_events: int = 30
     commentary_possession_max_age_sec: float = 8.0
-    commentary_llm_backend: str = "ollama"
-    commentary_llm_url: str = "http://localhost:11434/"
-    commentary_llm_model: str = "qwen3.5:9b"
+    commentary_llm_backend: str = "vllm"
+    commentary_llm_url: str = "http://localhost:8001/"
+    commentary_llm_model: str = "nvidia/Qwen3-8B-NVFP4"
+    commentary_vllm_batch_size: int = 4
+    commentary_vllm_enable_thinking: bool = False
     commentary_flush_gpu_before_llm: bool = True
     commentary_context_window_sec: float = 12.0
     commentary_context_stride_sec: float = 1.0
@@ -114,48 +111,38 @@ class FullPipelineConfig:
     commentary_state_interval_sec: float = 10.0
     commentary_llm_timeout_sec: float = 90.0
     commentary_min_audio_gap_sec: float = 0.35
-    # TTS + audio mixing onto overlay video
     commentary_enable_tts: bool = True
     commentary_tts_backend: str = "xttsv2"
     commentary_speaker_wav: Optional[str] = str(Path(__file__).resolve().parent / "ertem_sener.wav")
 
-    # heuristics
     possession_dist_norm: float = 0.08
     possession_stable_frames: int = 6
     possession_stride_frames: int = 5
     ball_cls_id: int = 1
     player_cls_id: int = 0
 
-
 def _repo_root() -> Path:
-    # web/backend/pipeline.py -> parents: backend(0), web(1), repo(2)
     return Path(__file__).resolve().parents[2]
 
-
-def _default_action_checkpoint() -> Optional[str]:
-    p = _repo_root() / "model-training" / "action_spotting" / "spotting_v2" / "checkpoints" / "v3_cnn_0211_2000_best_map.pth"
+def _default_tdeed_repo_dir() -> Optional[str]:
+    p = _repo_root() / "model-training" / "action_spotting" / "T-DEED-main"
     return str(p) if p.exists() else None
-
 
 def _default_tracking_config() -> Optional[str]:
     p = _repo_root() / "model-training" / "tracking-reid-osnet" / "config.yaml"
     return str(p) if p.exists() else None
 
-
 def _default_calibration_detector_weights() -> Optional[str]:
     p = _repo_root() / "model-training" / "calibration" / "best.pt"
     return str(p) if p.exists() else None
-
 
 def _default_calibration_kp_weights() -> Optional[str]:
     p = _repo_root() / "model-training" / "calibration" / "SV_kp.pth"
     return str(p) if p.exists() else None
 
-
 def _default_calibration_line_weights() -> Optional[str]:
     p = _repo_root() / "model-training" / "calibration" / "SV_lines.pth"
     return str(p) if p.exists() else None
-
 
 def run_calibration_pipeline(
     *,
@@ -166,10 +153,6 @@ def run_calibration_pipeline(
     cfg: Optional[FullPipelineConfig] = None,
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Run calibration as a subprocess and return artifact paths.
-
-    Best-effort: callers should catch exceptions and proceed.
-    """
 
     repo = _repo_root()
     script = repo / "model-training" / "calibration" / "run_pipeline_calibration.py"
@@ -280,7 +263,6 @@ def run_calibration_pipeline(
     env.setdefault("PYTHONFAULTHANDLER", "1")
     env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
 
-    # Stream stdout to extract progress and final JSON payload.
     p = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -322,7 +304,6 @@ def run_calibration_pipeline(
                     continue
                 continue
 
-            # The runner prints a JSON object at the end with artifact paths.
             if line.startswith("{") and "map_video_path" in line and "events_json_path" in line:
                 try:
                     last_json = json.loads(line)
@@ -344,7 +325,6 @@ def run_calibration_pipeline(
         last_json["config"] = calibration_config
         return last_json
 
-    # Best-effort fallback: return declared output paths.
     return {
         "map_video_path": str(Path(out_map).resolve()),
         "events_json_path": str(Path(out_events).resolve()),
@@ -352,14 +332,12 @@ def run_calibration_pipeline(
         **({"frames_jsonl_path": str(Path(str(out_frames)).resolve())} if out_frames and str(out_frames).strip() else {}),
     }
 
-
 def _timecode(t: float) -> str:
     if t < 0:
         t = 0
     m = int(t // 60)
     s = int(t % 60)
     return f"{m:02d}:{s:02d}"
-
 
 def _event_desc_tr(label: str) -> str:
     mapping = {
@@ -380,9 +358,15 @@ def _event_desc_tr(label: str) -> str:
         "Ball out of play": "Top oyun alanını terk etti.",
         "Direct free-kick": "Direkt serbest vuruş.",
         "Indirect free-kick": "Endirekt serbest vuruş.",
+        "Pass": "Pas atıldı.",
+        "Drive": "Top sürüldü.",
+        "Header": "Kafa vuruşu.",
+        "High pass": "Uzun pas atıldı.",
+        "Free-kick": "Serbest vuruş.",
+        "Shot": "Şut çekildi!",
+        "Ball player block": "Oyuncu topu kesti.",
     }
     return mapping.get(label, f"Olay: {label}")
-
 
 def _clamp_int(v: float, lo: int, hi: int) -> int:
     try:
@@ -391,17 +375,15 @@ def _clamp_int(v: float, lo: int, hi: int) -> int:
         iv = int(lo)
     return max(int(lo), min(int(hi), iv))
 
-
 def _is_special_track_id(track_id: int) -> bool:
-    """Reserved/special IDs produced by the tracker (referee/goalkeeper).
-
-    These tracks should never be sent to jersey-number inference.
-    """
     try:
         return int(track_id) >= 800_000_000
     except Exception:
         return False
 
+def _strip_think_blocks(text: str) -> str:
+    s = re.sub(r"<think>[\s\S]*?</think>", "", str(text or ""), flags=re.IGNORECASE)
+    return s.strip()
 
 def _qwen_text_openai_compatible(
     *,
@@ -409,8 +391,8 @@ def _qwen_text_openai_compatible(
     model: str,
     prompt: str,
     timeout_sec: float = 60.0,
+    enable_thinking: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort OpenAI-compatible text call (llama.cpp/vLLM style)."""
     if httpx is None:
         return None, None
 
@@ -419,7 +401,7 @@ def _qwen_text_openai_compatible(
         return None, None
 
     endpoint = base + "/v1/chat/completions"
-    payload = {
+    payload: Dict[str, Any] = {
         "model": str(model or "qwen3vl8b"),
         "messages": [
             {
@@ -432,8 +414,10 @@ def _qwen_text_openai_compatible(
             },
         ],
         "temperature": 0.7,
-        "max_tokens": 800,
+        "max_tokens": 300,
     }
+    if not enable_thinking:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
     try:
         with httpx.Client(timeout=float(timeout_sec)) as client:
@@ -451,68 +435,18 @@ def _qwen_text_openai_compatible(
     except Exception:
         raw = ""
 
-    return raw, None
-
-
-def _ollama_text_chat(
-    *,
-    base_url: str,
-    model: str,
-    prompt: str,
-    timeout_sec: float = 120.0,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort Ollama native chat call."""
-    if httpx is None:
-        return None, None
-
-    base = _normalize_base_url(base_url)
-    if not base:
-        return None, None
-
-    endpoint = base + "/api/chat"
-    payload = {
-        "model": str(model or "qwen3.5:9b"),
-        "stream": False,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a Turkish football commentator.",
-            },
-            {
-                "role": "user",
-                "content": str(prompt or ""),
-            },
-        ],
-    }
-
-    try:
-        with httpx.Client(timeout=float(timeout_sec)) as client:
-            r = client.post(endpoint, json=payload)
-            r.raise_for_status()
-            data = r.json()
-    except Exception as e:
-        return None, str(e)
-
-    raw = ""
-    try:
-        msg = data.get("message") or {}
-        raw = str(msg.get("content") or "").strip()
-        if not raw:
-            raw = str(data.get("response") or "").strip()
-    except Exception:
-        raw = ""
+    if not enable_thinking:
+        raw = _strip_think_blocks(raw)
 
     return raw, None
-
 
 def _normalize_commentary_backend(name: str) -> str:
     raw = str(name or "").strip().lower()
-    if raw in ("", "ollama", "ollama-native", "native"):
-        return "ollama"
-    if raw in ("openai", "openai-compatible", "compat", "llama.cpp", "vllm"):
+    if raw in ("vllm", "vllm-openai", ""):
+        return "vllm"
+    if raw in ("openai", "openai-compatible", "compat", "llama.cpp"):
         return "openai"
     return raw
-
 
 def _request_commentary_text(
     *,
@@ -521,38 +455,188 @@ def _request_commentary_text(
     prompt: str,
     backend: str,
     timeout_sec: float = 120.0,
+    enable_thinking: bool = False,
+    timecode: Optional[str] = None,
+    emit_cb: Optional[Any] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    mode = _normalize_commentary_backend(backend)
-    if mode == "ollama":
-        raw, err = _ollama_text_chat(
-            base_url=base_url,
-            model=model,
-            prompt=prompt,
-            timeout_sec=timeout_sec,
-        )
-        if raw:
-            return raw, None
-
-        compat_raw, compat_err = _qwen_text_openai_compatible(
-            base_url=base_url,
-            model=model,
-            prompt=prompt,
-            timeout_sec=timeout_sec,
-        )
-        if compat_raw:
-            return compat_raw, None
-        return None, err or compat_err
-
-    return _qwen_text_openai_compatible(
+    raw, err = _qwen_text_openai_compatible(
         base_url=base_url,
         model=model,
         prompt=prompt,
         timeout_sec=timeout_sec,
+        enable_thinking=enable_thinking,
     )
 
+    if err and emit_cb is not None:
+        try:
+            emit_cb(
+                "commentary_llm_error",
+                0,
+                1,
+                f"[{timecode or '??:??'}] vLLM hata: {err[:200]}",
+            )
+        except Exception:
+            pass
+
+    return raw, err
+
+async def _request_commentary_batch_async(
+    *,
+    prompts: List[str],
+    endpoint: str,
+    payload_template: Dict[str, Any],
+    timeout_sec: float,
+    enable_thinking: bool,
+    batch_size: int,
+) -> List[Tuple[Optional[str], Optional[str]]]:
+    import asyncio as _asyncio
+
+    if httpx is None:
+        return [(None, "httpx not available")] * len(prompts)
+
+    async def _call_one(session: Any, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+        payload = dict(payload_template)
+        msgs = [dict(m) for m in payload["messages"]]
+        msgs[-1] = dict(msgs[-1], content=str(prompt))
+        payload["messages"] = msgs
+        try:
+            r = await session.post(endpoint, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            return None, str(e)
+        raw = ""
+        try:
+            choices = data.get("choices") or []
+            msg = (choices[0] or {}).get("message") or {}
+            raw = str(msg.get("content") or "").strip()
+        except Exception:
+            raw = ""
+        if not enable_thinking:
+            raw = _strip_think_blocks(raw)
+        return raw or None, None
+
+    results: List[Tuple[Optional[str], Optional[str]]] = []
+    async with httpx.AsyncClient(timeout=float(timeout_sec)) as session:
+        for chunk_start in range(0, len(prompts), batch_size):
+            chunk = prompts[chunk_start : chunk_start + batch_size]
+            chunk_results = await _asyncio.gather(
+                *[_call_one(session, p) for p in chunk],
+                return_exceptions=True,
+            )
+            for res in chunk_results:
+                if isinstance(res, BaseException):
+                    results.append((None, str(res)))
+                else:
+                    results.append(res)
+    return results
+
+def _request_commentary_batch(
+    *,
+    prompts: List[str],
+    base_url: str,
+    model: str,
+    backend: str,
+    timeout_sec: float = 120.0,
+    enable_thinking: bool = False,
+    batch_size: int = 4,
+    emit_cb: Optional[Any] = None,
+    timecodes: Optional[List[str]] = None,
+) -> List[Tuple[Optional[str], Optional[str]]]:
+    import asyncio as _asyncio
+
+    _mode = _normalize_commentary_backend(backend)
+
+    if httpx is None:
+        return [
+            _request_commentary_text(
+                base_url=base_url,
+                model=model,
+                prompt=p,
+                backend=backend,
+                timeout_sec=timeout_sec,
+                enable_thinking=enable_thinking,
+                timecode=str((timecodes or [])[i]) if timecodes and i < len(timecodes) else None,
+                emit_cb=emit_cb,
+            )
+            for i, p in enumerate(prompts)
+        ]
+
+    base = _normalize_base_url(base_url)
+    if not base:
+        return [(None, "invalid base_url")] * len(prompts)
+
+    payload_template: Dict[str, Any] = {
+        "model": str(model),
+        "messages": [
+            {"role": "system", "content": "You are a Turkish football commentator."},
+            {"role": "user", "content": ""},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 300,
+    }
+    if not enable_thinking:
+        payload_template["chat_template_kwargs"] = {"enable_thinking": False}
+
+    try:
+        loop = _asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures as _cf
+            fut = _cf.Future()
+            async def _run():
+                try:
+                    fut.set_result(await _request_commentary_batch_async(
+                        prompts=prompts,
+                        endpoint=base + "/v1/chat/completions",
+                        payload_template=payload_template,
+                        timeout_sec=timeout_sec,
+                        enable_thinking=enable_thinking,
+                        batch_size=batch_size,
+                    ))
+                except Exception as exc:
+                    fut.set_exception(exc)
+            _asyncio.ensure_future(_run())
+            results = fut.result(timeout=timeout_sec * len(prompts))
+        else:
+            results = loop.run_until_complete(
+                _request_commentary_batch_async(
+                    prompts=prompts,
+                    endpoint=base + "/v1/chat/completions",
+                    payload_template=payload_template,
+                    timeout_sec=timeout_sec,
+                    enable_thinking=enable_thinking,
+                    batch_size=batch_size,
+                )
+            )
+    except RuntimeError:
+        results = _asyncio.run(
+            _request_commentary_batch_async(
+                prompts=prompts,
+                endpoint=base + "/v1/chat/completions",
+                payload_template=payload_template,
+                timeout_sec=timeout_sec,
+                enable_thinking=enable_thinking,
+                batch_size=batch_size,
+            )
+        )
+
+    if emit_cb is not None:
+        for i, (raw, err) in enumerate(results):
+            if err:
+                tc = str((timecodes or [])[i]) if timecodes and i < len(timecodes) else str(i)
+                try:
+                    emit_cb(
+                        "commentary_llm_error",
+                        0,
+                        1,
+                        f"[{tc}] vLLM batch hata (idx={i}): {err[:200]}",
+                    )
+                except Exception:
+                    pass
+
+    return results
 
 def _flush_gpu_vram() -> Dict[str, Any]:
-    """Best-effort cleanup for local CUDA allocations before commentary generation."""
     info: Dict[str, Any] = {
         "gc_collected": 0,
         "torch_available": False,
@@ -604,9 +688,7 @@ def _flush_gpu_vram() -> Dict[str, Any]:
     info["elapsed_sec"] = round(time.perf_counter() - started, 3)
     return info
 
-
 def _build_commentary_prompt(items: List[Dict[str, Any]]) -> str:
-    """Prompt with richer per-window match-state context for Turkish commentary."""
     return (
         "Sen güçlü bir futbol maç spikerisin. Aşağıda her olay için zaman penceresi boyunca toplanmış maç durumu verisi var.\n"
         "Her olay için en fazla 2 cümlelik, doğal, akıcı ve sahadaki oyunun akışını anlatan Türkçe yorum yaz.\n"
@@ -624,7 +706,6 @@ def _build_commentary_prompt(items: List[Dict[str, Any]]) -> str:
         + json.dumps(items, ensure_ascii=False, indent=2)
     )
 
-
 def _commentary_style_for_item(item: Dict[str, Any]) -> str:
     styles = [
         "yüksek tempolu ve coşkulu anlatım",
@@ -639,7 +720,6 @@ def _commentary_style_for_item(item: Dict[str, Any]) -> str:
     except Exception:
         idx = 0
     return styles[idx]
-
 
 def _build_commentary_item_prompt(item: Dict[str, Any], recent_texts: List[str]) -> str:
     style = _commentary_style_for_item(item)
@@ -672,9 +752,11 @@ def _build_commentary_item_prompt(item: Dict[str, Any], recent_texts: List[str])
         + json.dumps(item, ensure_ascii=False, indent=2)
     )
 
-
 def _extract_commentary_text_best_effort(raw: str) -> Optional[str]:
     s = str(raw or "").strip()
+    if not s:
+        return None
+    s = re.sub(r"<think>[\s\S]*?</think>", "", s, flags=re.IGNORECASE).strip()
     if not s:
         return None
     s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
@@ -700,7 +782,6 @@ def _extract_commentary_text_best_effort(raw: str) -> Optional[str]:
         return str(m.group(1)).strip() or None
 
     return s.strip() or None
-
 
 def _match_state_fallback_sentence(match_state: Dict[str, Any]) -> str:
     state = match_state.get("state_summary") if isinstance(match_state, dict) else None
@@ -730,13 +811,11 @@ def _match_state_fallback_sentence(match_state: Dict[str, Any]) -> str:
     text = ". ".join(p.rstrip(".!") for p in parts if p).strip()
     return (text + ".") if text else "Oyun akışı tempolu biçimde sürüyor."
 
-
 def _normalize_commentary_compare(text: str) -> str:
     s = str(text or "").lower()
     s = re.sub(r"[^a-z0-9çğıöşü\s]", " ", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def _is_repetitive_commentary(text: str, recent_texts: List[str]) -> bool:
     cur = _normalize_commentary_compare(text)
@@ -752,7 +831,6 @@ def _is_repetitive_commentary(text: str, recent_texts: List[str]) -> bool:
         if cur_head and cur_head == " ".join(pp.split()[:7]):
             return True
     return False
-
 
 def _fallback_commentary_text(item: Dict[str, Any], recent_texts: Optional[List[str]] = None) -> str:
     recent_texts = recent_texts or []
@@ -795,7 +873,6 @@ def _fallback_commentary_text(item: Dict[str, Any], recent_texts: Optional[List[
         out = out.replace("Sahada", "Bu bölümde").replace("Top", "Oyun")
     return out
 
-
 def _sanitize_commentary_text(text: str, item: Dict[str, Any], recent_texts: Optional[List[str]] = None) -> str:
     recent_texts = recent_texts or []
     raw = str(text or "").strip()
@@ -826,7 +903,6 @@ def _sanitize_commentary_text(text: str, item: Dict[str, Any], recent_texts: Opt
         out += "."
     return out
 
-
 def _commentary_item_period_sec(item: Dict[str, Any]) -> float:
     window = item.get("window") if isinstance(item, dict) else None
     window = window if isinstance(window, dict) else {}
@@ -836,14 +912,11 @@ def _commentary_item_period_sec(item: Dict[str, Any]) -> float:
     except Exception:
         return 10.0
 
-
 def _commentary_sentence_budget(period_sec: float) -> int:
     return 1 if float(period_sec) <= 18.0 else 2
 
-
 def _commentary_word_budget(period_sec: float) -> int:
     return max(7, min(22, int(round(float(period_sec) * 0.6))))
-
 
 def _trim_commentary_text(text: str, *, max_sentences: int, max_words: int) -> str:
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(text or "").strip()) if s.strip()]
@@ -858,7 +931,6 @@ def _trim_commentary_text(text: str, *, max_sentences: int, max_words: int) -> s
     clipped = clipped.strip(" ,")
     clipped = re.sub(r"[,:;]+$", "", clipped)
     return clipped
-
 
 def _build_commentary_items(
     *,
@@ -875,11 +947,19 @@ def _build_commentary_items(
     max_events = int(getattr(cfg, "commentary_max_events", 30) or 30)
     segment_sec = max(10.0, float(getattr(cfg, "commentary_segment_sec", 30.0) or 30.0))
 
+    _CRITICAL_LABELS: set = {
+        "goal", "yellow card", "red card", "corner", "penalty",
+        "own goal", "goal (handball)", "penalty - goal",
+        "shot on target", "var",
+    }
+
     anchors: List[Tuple[float, int, Dict[str, Any]]] = []
 
     for e in action_events:
         try:
-            anchors.append((float(e.get("t", 0.0)), 0, e))
+            label = str(e.get("label") or e.get("type") or "").strip().lower()
+            prio = -1 if label in _CRITICAL_LABELS else 0
+            anchors.append((float(e.get("t", 0.0)), prio, e))
         except Exception:
             continue
 
@@ -1006,30 +1086,20 @@ def _build_commentary_items(
 
     return items_in
 
-
 def _extract_json_array_best_effort(raw: str) -> Optional[str]:
-    """Extract the first top-level JSON array from a model response.
-
-    Qwen (or OpenAI-compatible servers) sometimes wrap JSON in markdown fences
-    or add extra prose. We best-effort extract the first `[...]` block.
-    """
     s = str(raw or "").strip()
     if not s:
         return None
-    # Strip common markdown fences
     s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
     s = re.sub(r"\s*```$", "", s.strip())
-    # Find first JSON array
     start = s.find("[")
     end = s.rfind("]")
     if start == -1 or end == -1 or end <= start:
         return None
     return s[start : end + 1]
 
-
 def _timecode_mmss(t: float) -> str:
     return _timecode(float(t))
-
 
 def _assign_actor_track_id_to_action(
     *,
@@ -1037,7 +1107,6 @@ def _assign_actor_track_id_to_action(
     possession_events: List[Dict[str, Any]],
     max_age_sec: float,
 ) -> Optional[int]:
-    """Pick the last known ball owner at/before action_t."""
     best_t = -1e9
     best_id: Optional[int] = None
     for e in possession_events:
@@ -1066,7 +1135,6 @@ def _assign_actor_track_id_to_action(
         return None
     return int(best_id)
 
-
 def _load_calibration_frames_jsonl(path: Optional[str]) -> Tuple[List[Dict[str, Any]], List[float]]:
     frames: List[Dict[str, Any]] = []
     times: List[float] = []
@@ -1089,14 +1157,12 @@ def _load_calibration_frames_jsonl(path: Optional[str]) -> Tuple[List[Dict[str, 
 
     return frames, times
 
-
 def _lane_label(x: float) -> str:
     if x <= -14.0:
         return "sol kanat"
     if x >= 14.0:
         return "sağ kanat"
     return "merkez"
-
 
 def _band_label(y: float) -> str:
     if y <= -18.0:
@@ -1105,10 +1171,8 @@ def _band_label(y: float) -> str:
         return "hücum bölgesi"
     return "orta saha"
 
-
 def _is_penalty_area_zone(x: float, y: float) -> bool:
     return abs(float(x)) <= 20.0 and abs(float(y)) >= 24.0
-
 
 def _compact_event_for_commentary(e: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
@@ -1128,7 +1192,6 @@ def _compact_event_for_commentary(e: Dict[str, Any]) -> Dict[str, Any]:
         if key in e:
             out[key] = e.get(key)
     return out
-
 
 def _summarize_calibration_window(
     *,
@@ -1161,12 +1224,12 @@ def _summarize_calibration_window(
                 _compact_event_for_commentary(e)
                 for e in calibration_events
                 if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
-            ][:6],
+            ][:4],
             "possession_events": [
                 _compact_event_for_commentary(e)
                 for e in possession_events
                 if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
-            ][:6],
+            ][:4],
         }
 
     half_window = max(2.0, float(window_sec) / 2.0)
@@ -1351,7 +1414,7 @@ def _summarize_calibration_window(
         _compact_event_for_commentary(e)
         for e in possession_events
         if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
-    ][:8]
+    ][:4]
     if len(window_possession) >= 3:
         state_tags.append("topa sahip olma değişimleri")
 
@@ -1359,7 +1422,7 @@ def _summarize_calibration_window(
         _compact_event_for_commentary(e)
         for e in calibration_events
         if start_t <= float(e.get("t", 0.0) or 0.0) <= end_t
-    ][:8]
+    ][:4]
 
     start_frame = int(frame_samples[0].get("frame_idx", 0)) if frame_samples else None
     end_frame = int(frame_samples[-1].get("frame_idx", 0)) if frame_samples else None
@@ -1386,27 +1449,18 @@ def _summarize_calibration_window(
         "possession_events": window_possession,
     }
 
-
 def _mix_commentary_audio_into_video(
     *,
     base_video_path: str,
     out_path: str,
     clips: List[Tuple[float, str]],
 ) -> Optional[str]:
-    """Mix timestamped audio clips into the video.
-
-    Produces a new MP4 that contains:
-    - Video stream copied/re-encoded from base_video_path
-    - Audio stream composed ONLY from the commentary clips placed at timestamps
-      (i.e., the base video's original audio is not kept)
-    """
     ffmpeg_bin = _ffmpeg_exe()
     if not ffmpeg_bin:
         return None
     if not clips:
         return None
 
-    # Keep only existing audio files.
     kept: List[Tuple[float, str]] = []
     for t, p in clips:
         try:
@@ -1421,7 +1475,6 @@ def _mix_commentary_audio_into_video(
     for _, ap in kept:
         inputs += ["-i", str(Path(ap).resolve())]
 
-    # Best-effort: compute video duration so we can create a silent base track of equal length.
     duration_sec: Optional[float] = None
     try:
         cap = cv2.VideoCapture(str(base_video_path))
@@ -1437,16 +1490,11 @@ def _mix_commentary_audio_into_video(
     except Exception:
         duration_sec = None
 
-    # Build filter_complex.
-    # Audio inputs start at index 1.
     parts: List[str] = []
     amix_inputs: List[str] = []
 
-    # Normalize all audio to a consistent format before mixing.
-    # Add a silent baseline so the output audio track spans the full video duration.
     use_silence = duration_sec is not None and duration_sec > 0.25
     if use_silence:
-        # anullsrc is infinite; trim it to the video duration.
         dur = max(0.25, float(duration_sec))
         parts.append(
             "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=0:{:.3f},asetpts=N/SR/TB[sil]".format(dur)
@@ -1456,13 +1504,11 @@ def _mix_commentary_audio_into_video(
     for i, (t, _ap) in enumerate(kept, start=1):
         delay_ms = max(0, int(round(float(t) * 1000.0)))
         tag = f"a{i}"
-        # aformat makes mix more robust across WAV/AAC input variations.
         parts.append(
             f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,adelay={delay_ms}|{delay_ms}[{tag}]"
         )
         amix_inputs.append(f"[{tag}]")
 
-    # If we have a silent baseline, set duration=first to match it; else match the longest clip.
     mix_duration = "first" if use_silence else "longest"
     parts.append(
         "".join(amix_inputs)
@@ -1498,7 +1544,6 @@ def _mix_commentary_audio_into_video(
         subprocess.run(cmd, capture_output=True, text=True, check=True)
         return out_path
     except Exception:
-        # Fallback: re-encode video if stream copy fails.
         try:
             cmd2 = [
                 ffmpeg_bin,
@@ -1531,7 +1576,6 @@ def _mix_commentary_audio_into_video(
         except Exception:
             return None
 
-
 def _audio_duration_sec(audio_path: str) -> float:
     try:
         with wave.open(str(audio_path), "rb") as wf:
@@ -1543,7 +1587,6 @@ def _audio_duration_sec(audio_path: str) -> float:
     except Exception:
         return 0.0
 
-
 def _jersey_crop_from_player_bbox(
     frame_bgr: np.ndarray,
     *,
@@ -1552,11 +1595,6 @@ def _jersey_crop_from_player_bbox(
     x2: int,
     y2: int,
 ) -> Optional[np.ndarray]:
-    """Return a crop suitable for reading the jersey number.
-
-    The jersey-number-recognition project effectively classifies a player crop.
-    Here we keep it similar but bias toward torso area to reduce background.
-    """
     h, w = frame_bgr.shape[:2]
     x1 = _clamp_int(x1, 0, w - 1)
     x2 = _clamp_int(x2, 0, w - 1)
@@ -1567,7 +1605,6 @@ def _jersey_crop_from_player_bbox(
 
     bw = x2 - x1
     bh = y2 - y1
-    # torso-ish region (centered)
     cx1 = x1 + int(0.15 * bw)
     cx2 = x2 - int(0.15 * bw)
     cy1 = y1 + int(0.20 * bh)
@@ -1577,7 +1614,6 @@ def _jersey_crop_from_player_bbox(
     cy1 = _clamp_int(cy1, 0, h - 1)
     cy2 = _clamp_int(cy2, 0, h - 1)
     if cx2 <= cx1 or cy2 <= cy1:
-        # fallback to full bbox crop
         crop = frame_bgr[y1:y2, x1:x2]
     else:
         crop = frame_bgr[cy1:cy2, cx1:cx2]
@@ -1585,21 +1621,16 @@ def _jersey_crop_from_player_bbox(
         return None
     return crop
 
-
 def _parse_jersey_number_from_text(text: str) -> Optional[str]:
-    """Parse model output following strict rules: digits only or -1."""
     if not text:
         return None
     t = str(text).strip()
 
-    # allow single -1
     if t == "-1":
         return "-1"
 
-    # Some servers may wrap output with whitespace/newlines; keep only first token.
     t = t.split()[0] if t.split() else t
 
-    # strict digits only
     if not re.fullmatch(r"\d{1,2}", t):
         return None
     try:
@@ -1610,17 +1641,14 @@ def _parse_jersey_number_from_text(text: str) -> Optional[str]:
         return str(n)
     return None
 
-
 def _normalize_base_url(url: str) -> str:
     u = str(url or "").strip()
     if not u:
         return ""
     return u[:-1] if u.endswith("/") else u
 
-
 def _normalize_model_name_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
-
 
 def _fetch_qwen_vl_models(base_url: str, timeout_sec: float = 10.0) -> List[str]:
     if httpx is None:
@@ -1667,7 +1695,6 @@ def _fetch_qwen_vl_models(base_url: str, timeout_sec: float = 10.0) -> List[str]
 
     return candidates
 
-
 def _resolve_qwen_vl_model_name(base_url: str, preferred_model: str) -> str:
     preferred = str(preferred_model or "").strip()
     models = _fetch_qwen_vl_models(base_url=base_url)
@@ -1683,7 +1710,6 @@ def _resolve_qwen_vl_model_name(base_url: str, preferred_model: str) -> str:
 
     return str(models[0])
 
-
 def _qwen_vl_openai_compatible(
     *,
     crop_bgr: np.ndarray,
@@ -1692,14 +1718,12 @@ def _qwen_vl_openai_compatible(
     prompt: str,
     timeout_sec: float = 30.0,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Try OpenAI-compatible chat completions (common for llama.cpp/vllm servers)."""
     try:
         import base64
         import httpx
     except Exception:
         return None, None
 
-    # Encode image as base64 data URL
     try:
         ok, buf = cv2.imencode(".png", crop_bgr)
         if not ok:
@@ -1748,7 +1772,6 @@ def _qwen_vl_openai_compatible(
     jersey = _parse_jersey_number_from_text(str(raw_text or ""))
     return jersey, raw_text
 
-
 def _qwen_vl_ask_jersey_number(
     *,
     crop_bgr: np.ndarray,
@@ -1756,11 +1779,6 @@ def _qwen_vl_ask_jersey_number(
     model: Optional[str] = None,
     prompt: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Ask Qwen-VL for jersey number from an image crop.
-
-    Returns: (jersey_number, raw_text)
-    """
-    # prompt must enforce digits-only or -1
     prompt = prompt or (
         "You are reading a football jersey.\n\n"
         "Visually read the number printed on the player's shirt.\n\n"
@@ -1773,7 +1791,6 @@ def _qwen_vl_ask_jersey_number(
         "Return only the final answer.\n"
     )
 
-    # First try OpenAI-compatible HTTP API (common on :8080)
     jersey_http, raw_http = _qwen_vl_openai_compatible(
         crop_bgr=crop_bgr,
         base_url=str(qwen_url),
@@ -1783,13 +1800,11 @@ def _qwen_vl_ask_jersey_number(
     if jersey_http is not None:
         return jersey_http, raw_http
 
-    # Fallback: Gradio client (common for localhost:7860)
     try:
         from gradio_client import Client, handle_file  # type: ignore
     except Exception:
         return None, None
 
-    # Save a temporary PNG for upload.
     try:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
             tmp_path = tf.name
@@ -1810,7 +1825,6 @@ def _qwen_vl_ask_jersey_number(
         client = Client(qwen_url)
         img = handle_file(tmp_path)
 
-        # Try a few common Gradio signatures / endpoints.
         attempts: List[Tuple[Optional[str], Tuple[Any, ...]]] = [
             ("/predict", (prompt, img)),
             ("/predict", (img, prompt)),
@@ -1828,11 +1842,9 @@ def _qwen_vl_ask_jersey_number(
                 else:
                     res = client.predict(*args, api_name=api_name)
 
-                # Normalize result to a string.
                 if isinstance(res, str):
                     raw_text = res
                 elif isinstance(res, (list, tuple)) and res:
-                    # take first string-like item
                     cand = None
                     for item in res:
                         if isinstance(item, str):
@@ -1856,7 +1868,6 @@ def _qwen_vl_ask_jersey_number(
                 last_exc = e
                 continue
 
-        # If all attempts failed, return no prediction.
         _ = last_exc
         return None, raw_text
     finally:
@@ -1865,13 +1876,11 @@ def _qwen_vl_ask_jersey_number(
         except Exception:
             pass
 
-
 def _select_jersey_samples_from_tracks_csv(
     *,
     tracks_csv_path: str,
     cfg: FullPipelineConfig,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    """Pick a few high-quality player bboxes per track to query Qwen-VL."""
     per_track: Dict[int, List[Dict[str, Any]]] = {}
 
     def can_add(existing: List[Dict[str, Any]], frame_id: int) -> bool:
@@ -1927,12 +1936,10 @@ def _select_jersey_samples_from_tracks_csv(
                     "score": score,
                 }
             )
-            # keep best-N by score
             lst.sort(key=lambda s: float(s.get("score", 0.0)), reverse=True)
             if len(lst) > int(cfg.jersey_max_samples_per_track):
                 del lst[int(cfg.jersey_max_samples_per_track) :]
 
-    # Keep only top tracks by their best sample score (cap total work).
     track_scores: List[Tuple[float, int]] = []
     for tid, samples in per_track.items():
         if not samples:
@@ -1943,7 +1950,6 @@ def _select_jersey_samples_from_tracks_csv(
     keep = set(tid for _, tid in track_scores[: int(cfg.jersey_max_tracks)])
     return {tid: per_track[tid] for tid in keep if tid in per_track}
 
-
 def infer_jersey_numbers_from_tracking(
     *,
     video_path: str,
@@ -1952,7 +1958,6 @@ def infer_jersey_numbers_from_tracking(
     cfg: FullPipelineConfig,
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[int, Dict[str, Any]]:
-    """Return track_id -> {jersey_number, confidence, samples...}. Best-effort."""
     if not cfg.run_jersey_number_recognition:
         return {}
 
@@ -1965,7 +1970,6 @@ def infer_jersey_numbers_from_tracking(
 
     frame_ids = sorted(by_frame.keys())
 
-    # Pre-pass: collect per-track metadata and (optionally) select top-N tracks by best bbox score.
     track_best_score: Dict[int, float] = {}
     track_first_frame: Dict[int, int] = {}
     track_last_frame: Dict[int, int] = {}
@@ -2047,7 +2051,6 @@ def infer_jersey_numbers_from_tracking(
     crop_dir = str(Path(out_dir) / "jersey_crops")
     os.makedirs(crop_dir, exist_ok=True)
 
-    # Stateful scan: query on first appearance and then re-query only if still unknown (-1), with min gap.
     gap = max(1, int(cfg.jersey_min_frame_gap))
     max_attempts = max(1, int(cfg.jersey_max_samples_per_track))
 
@@ -2067,7 +2070,6 @@ def infer_jersey_numbers_from_tracking(
     total_est = int(len(keep_tracks) * max_attempts)
 
     def best_vote(votes: Dict[str, int]) -> Tuple[Optional[str], float, int, int]:
-        # returns (best_label, confidence, best_count, total_votes)
         if not votes:
             return (None, 0.0, 0, 0)
         items = sorted(votes.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
@@ -2079,7 +2081,6 @@ def infer_jersey_numbers_from_tracking(
     for fid in frame_ids:
         rows = by_frame.get(fid, [])
 
-        # Pick best player row per track in this frame for querying.
         cand: Dict[int, Dict[str, Any]] = {}
         cand_score: Dict[int, float] = {}
         cand_conf: Dict[int, float] = {}
@@ -2123,7 +2124,6 @@ def infer_jersey_numbers_from_tracking(
                 cand_conf[track_id] = float(conf)
                 cand_area[track_id] = float(area)
 
-        # Propagate jersey via relink_source_id before running any Qwen calls.
         for track_id, r in list(cand.items()):
             src_raw = r.get("relink_source_id", None)
             if src_raw is None or str(src_raw).strip() == "":
@@ -2137,7 +2137,6 @@ def infer_jersey_numbers_from_tracking(
                 jersey_conf[track_id] = float(jersey_conf.get(src_id, 1.0))
                 jersey_source[track_id] = int(src_id)
 
-        # Decide which tracks to query at this frame.
         to_query: List[Tuple[int, Dict[str, Any]]] = []
         for track_id, r in cand.items():
             if track_id in jersey_final:
@@ -2149,7 +2148,6 @@ def infer_jersey_numbers_from_tracking(
             if last_q is not None and int(fid) - int(last_q) < gap:
                 continue
 
-            # Always allow the very first attempt for each track.
             if attempts > 0:
                 c = float(cand_conf.get(track_id, 0.0))
                 a = float(cand_area.get(track_id, 0.0))
@@ -2160,7 +2158,6 @@ def infer_jersey_numbers_from_tracking(
         if not to_query:
             continue
 
-        # Load the frame once for all queries in this frame.
         try:
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(fid))
             ret, frame = cap.read()
@@ -2223,7 +2220,6 @@ def infer_jersey_numbers_from_tracking(
             votes[jersey_s] = int(votes.get(jersey_s, 0)) + 1
             best_lbl, conf, best_cnt, tot = best_vote(votes)
 
-            # Accept immediately on first readable digits.
             if best_lbl is not None and best_cnt >= 1:
                 jersey_final[int(track_id)] = str(best_lbl)
                 jersey_conf[int(track_id)] = float(conf)
@@ -2231,7 +2227,6 @@ def infer_jersey_numbers_from_tracking(
     cap.release()
 
     out: Dict[int, Dict[str, Any]] = {}
-    # Include all attempted tracks: digits if found, otherwise -1 (so the caller can see it was processed).
     attempted_ids = set(int(t) for t in per_track_attempts.keys())
     for tid in attempted_ids:
         jersey_num = str(jersey_final.get(int(tid), "-1")).strip()
@@ -2258,7 +2253,6 @@ def infer_jersey_numbers_from_tracking(
 
     return out
 
-
 def _resolve_track_id_remap(track_id: int, remap: Dict[int, int]) -> int:
     cur = int(track_id)
     seen = set()
@@ -2267,17 +2261,11 @@ def _resolve_track_id_remap(track_id: int, remap: Dict[int, int]) -> int:
         cur = int(remap[cur])
     return int(cur)
 
-
 def _build_track_id_remap_from_jerseys(
     *,
     jersey_by_track: Dict[int, Dict[str, Any]],
     cfg: FullPipelineConfig,
 ) -> Dict[int, int]:
-    """Return old_track_id -> canonical_track_id.
-
-    Conservative: only merges within same team_id and same jersey_number,
-    requires minimum confidence, and rejects merges where track lifetimes overlap.
-    """
 
     if not bool(getattr(cfg, "jersey_merge_same_number", False)):
         return {}
@@ -2318,7 +2306,6 @@ def _build_track_id_remap_from_jerseys(
         if len(uniq) < 2:
             continue
 
-        # Reject merging if any pair overlaps too much in time.
         ok = True
         ranges = {tid: lifetime(tid) for tid in uniq}
         for i in range(len(uniq)):
@@ -2334,20 +2321,16 @@ def _build_track_id_remap_from_jerseys(
         if not ok:
             continue
 
-        # Canonical = earliest first_frame, tie-breaker smallest id.
         uniq.sort(key=lambda tid: (lifetime(tid)[0], tid))
         canonical = int(uniq[0])
         for tid in uniq[1:]:
             remap[int(tid)] = canonical
 
-    # Resolve chains
     for k in list(remap.keys()):
         remap[k] = _resolve_track_id_remap(remap[k], remap)
     return remap
 
-
 def extract_segment_to_mp4(*, src_path: str, out_path: str, start_sec: float, duration_sec: Optional[float]) -> str:
-    """Extract/re-encode a segment using ffmpeg if available, otherwise OpenCV."""
     src_path = str(Path(src_path).resolve())
     out_path = str(Path(out_path).resolve())
 
@@ -2440,9 +2423,7 @@ def extract_segment_to_mp4(*, src_path: str, out_path: str, start_sec: float, du
 
     return out_path
 
-
 def _which(name: str) -> Optional[str]:
-    # avoid importing shutil in hot path; simple PATH scan
     exts = [""]
     if os.name == "nt":
         exts = [".exe", ".cmd", ".bat", ""]
@@ -2456,13 +2437,7 @@ def _which(name: str) -> Optional[str]:
                 return p
     return None
 
-
 def _ffmpeg_exe() -> Optional[str]:
-    """Return a usable ffmpeg executable path.
-
-    Tries system PATH first, then falls back to `imageio-ffmpeg` (which can
-    provide an ffmpeg binary on Windows without a global install).
-    """
     p = _which("ffmpeg")
     if p:
         return p
@@ -2476,10 +2451,8 @@ def _ffmpeg_exe() -> Optional[str]:
         return None
     return None
 
-
 def _docker_exe() -> Optional[str]:
     return _which("docker")
-
 
 def _docker_container_state(container_id: str) -> Tuple[Optional[str], Optional[str]]:
     docker_bin = _docker_exe()
@@ -2498,7 +2471,6 @@ def _docker_container_state(container_id: str) -> Tuple[Optional[str], Optional[
 
     state = str((res.stdout or "").strip()).lower()
     return (state or None), None
-
 
 def _wait_for_http_ready(
     *,
@@ -2530,7 +2502,6 @@ def _wait_for_http_ready(
 
     return {"ok": False, "error": last_error or "timeout waiting for http readiness"}
 
-
 def _wait_for_docker_container_state(
     *,
     container_id: str,
@@ -2560,14 +2531,12 @@ def _wait_for_docker_container_state(
         "error": last_error or f"timeout waiting for states {sorted(wanted)}",
     }
 
-
 def _set_qwen_vl_container_state(
     *,
     cfg: FullPipelineConfig,
     action: str,
     progress_cb: Optional[Callable[[str, int, int, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Best-effort Docker lifecycle control for the external VL server."""
     info: Dict[str, Any] = {
         "action": str(action),
         "enabled": False,
@@ -2665,7 +2634,6 @@ def _set_qwen_vl_container_state(
 
     return info
 
-
 def _write_tracks_csv_with_jersey(
     *,
     in_csv_path: str,
@@ -2674,11 +2642,6 @@ def _write_tracks_csv_with_jersey(
     track_id_remap: Optional[Dict[int, int]] = None,
     player_cls_id: int = 0,
 ) -> str:
-    """Copy tracking CSV and add a `jersey_number` column.
-
-    For player rows (cls_id == player_cls_id), writes jersey digits or "-1".
-    For non-player rows, leaves it empty.
-    """
 
     track_id_remap = track_id_remap or {}
     jersey_by_track = jersey_by_track or {}
@@ -2720,7 +2683,6 @@ def _write_tracks_csv_with_jersey(
 
     return out_csv_path
 
-
 def run_tracking_reid_osnet(
     *,
     video_path: str,
@@ -2743,8 +2705,6 @@ def run_tracking_reid_osnet(
     if not config_path:
         raise FileNotFoundError("tracking config.yaml not found")
 
-    # If OSNet is enabled in config but weights are missing, create a temp config disabling OSNet.
-    # The tracking script does not expose osnet.enabled via CLI overrides.
     try:
         import yaml  # type: ignore
 
@@ -2755,7 +2715,6 @@ def run_tracking_reid_osnet(
         osnet = cfg_obj.get("osnet") if isinstance(cfg_obj, dict) else None
         if isinstance(osnet, dict) and bool(osnet.get("enabled", False)):
             w_rel = str(osnet.get("weights", "") or "").strip()
-            # resolve weights relative to config file
             weights_path = Path(w_rel)
             if w_rel and not weights_path.is_absolute():
                 weights_path = (Path(config_path).resolve().parent / weights_path).resolve()
@@ -2767,7 +2726,6 @@ def run_tracking_reid_osnet(
                     yaml.safe_dump(cfg_obj, wf, sort_keys=False, allow_unicode=True)
                 config_path = str(tmp_cfg)
     except Exception:
-        # Best-effort; if yaml not available or parsing fails, we'll just run with given config.
         pass
 
     save_video = str(Path(out_dir) / f"tracking_{run_id}.mp4")
@@ -2788,7 +2746,6 @@ def run_tracking_reid_osnet(
         save_txt,
     ]
 
-    # Optional: run jersey inference during tracking (best-effort)
     jersey_json_path = str(Path(out_dir) / f"tracking_{run_id}.jersey.json")
     qwen_url = ""
     qwen_model = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"
@@ -2863,12 +2820,10 @@ def run_tracking_reid_osnet(
         env.setdefault("PYTHONFAULTHANDLER", "1")
         env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
         p = subprocess.Popen(cmd_to_run, stdout=lf, stderr=subprocess.STDOUT, text=True, env=env)
-        # attach so caller can close it later
         p._pipeline_log_handle = lf  # type: ignore[attr-defined]
         return p
 
     def _strip_jersey_flags(argv: List[str]) -> List[str]:
-        """Remove in-tracking jersey CLI flags from argv (best-effort)."""
         jersey_flags_1 = {
             "--jersey_enable",
             "--jersey_qwen_url",
@@ -2900,8 +2855,6 @@ def run_tracking_reid_osnet(
     start_ts = time.time()
     p = _run_tracking_subprocess(cmd, log_path)
 
-    # Prefer progress in frames/FPS (parsed from the tracking script logs).
-    # Fallback: elapsed-seconds ticker (but without misleading rate info).
     progress_re = re.compile(
         r"\[(?P<cur>\d+)\/(?P<total>\d+)\]\s+(?P<pct>[0-9.]+)%\s+\|\s+(?P<fps>[0-9.]+)\s+FPS\s+\|\s+ETA\s+(?P<eta>\d\d:\d\d:\d\d)"
     )
@@ -2912,7 +2865,6 @@ def run_tracking_reid_osnet(
     tick_pbar = tqdm(total=None, desc="Tracking", unit="s", bar_format="{desc}: {elapsed}")
 
     try:
-        # Open the log for tailing.
         try:
             rf = open(log_path, "r", encoding="utf-8", errors="ignore")
         except Exception:
@@ -2922,7 +2874,6 @@ def run_tracking_reid_osnet(
             rc = p.poll()
             any_update = False
 
-            # Tail log and parse progress lines.
             if rf is not None:
                 while True:
                     line = rf.readline()
@@ -2973,7 +2924,6 @@ def run_tracking_reid_osnet(
                 if rc is not None:
                     break
 
-                # If we didn't get a parsed progress line, still tick elapsed time.
                 if not any_update:
                     time.sleep(1.0)
                     try:
@@ -3011,14 +2961,11 @@ def run_tracking_reid_osnet(
         except Exception:
             pass
 
-    # If the jersey-enabled run crashed (often native/OOM with no traceback), retry once without jersey.
     tracking_retry_log_path: Optional[str] = None
     if p.returncode != 0 and jersey_cmd_enabled:
         try:
-            # Keep the failing log; write retry to a new file.
             tracking_retry_log_path = str(Path(out_dir) / f"tracking_{run_id}_retry_no_jersey.log")
 
-            # Remove potentially partial outputs before retry.
             for pp in (save_video, save_txt):
                 try:
                     if os.path.isfile(pp):
@@ -3029,7 +2976,6 @@ def run_tracking_reid_osnet(
             cmd_no_jersey = _strip_jersey_flags(list(cmd))
 
             p = _run_tracking_subprocess(cmd_no_jersey, tracking_retry_log_path)
-            # Tail retry log for progress updates (best-effort).
             rf2 = None
             try:
                 rf2 = open(tracking_retry_log_path, "r", encoding="utf-8", errors="ignore")
@@ -3104,7 +3050,6 @@ def run_tracking_reid_osnet(
                 pass
             log_path = tracking_retry_log_path
         except Exception:
-            # If retry setup fails, fall through to standard error handling below.
             pass
 
     if p.returncode != 0:
@@ -3140,7 +3085,6 @@ def run_tracking_reid_osnet(
     track_id_remap: Dict[int, int] = {}
     out_csv_path = save_txt
 
-    # Prefer jersey mapping produced during tracking.
     jersey_in_tracking_cfg = bool(getattr(cfg, "jersey_in_tracking", True)) if cfg is not None else False
     if cfg is not None and bool(getattr(cfg, "run_jersey_number_recognition", False)) and jersey_in_tracking_cfg:
         try:
@@ -3156,8 +3100,6 @@ def run_tracking_reid_osnet(
         except Exception:
             jersey_by_track = {}
 
-        # If jersey was requested in-tracking but didn't produce outputs (e.g., retry without jersey),
-        # fall back to post-tracking inference.
         if not jersey_by_track:
             try:
                 jersey_by_track = infer_jersey_numbers_from_tracking(
@@ -3190,7 +3132,6 @@ def run_tracking_reid_osnet(
                     pass
             jersey_by_track = canonical
 
-        # Enrich CSV in a separate file (keeps original script output intact)
         try:
             enriched = str(Path(out_dir) / f"tracking_{run_id}_with_jersey.csv")
             out_csv_path = _write_tracks_csv_with_jersey(
@@ -3203,7 +3144,6 @@ def run_tracking_reid_osnet(
         except Exception:
             out_csv_path = save_txt
 
-    # Fallback: if jersey was not done in tracking, infer after tracking.
     elif cfg is not None and bool(getattr(cfg, "run_jersey_number_recognition", False)):
         try:
             jersey_by_track = infer_jersey_numbers_from_tracking(
@@ -3245,6 +3185,211 @@ def run_tracking_reid_osnet(
         "tracking_seconds": float(time.time() - start_ts),
     }
 
+def _normalize_tdeed_label(label: str) -> str:
+    mapping: Dict[str, str] = {
+        "PASS": "Pass",
+        "DRIVE": "Drive",
+        "HEADER": "Header",
+        "HIGH PASS": "High pass",
+        "FREE KICK": "Free-kick",
+        "SHOT": "Shot",
+        "BALL PLAYER BLOCK": "Ball player block",
+        "BALL OUT OF PLAY": "Ball out of play",
+    }
+    return mapping.get(str(label).strip(), str(label).strip())
+
+def _resolve_tdeed_checkpoint_path(
+    *,
+    tdeed_dir: Path,
+    model_name: str,
+    explicit_checkpoint_path: Optional[str],
+) -> str:
+    if explicit_checkpoint_path and os.path.isfile(explicit_checkpoint_path):
+        return str(Path(explicit_checkpoint_path).resolve())
+
+    dataset_prefix = model_name.split("_")[0]
+    candidates = [
+        tdeed_dir / "checkpoints" / dataset_prefix / model_name / "checkpoint_best.pt",
+        tdeed_dir / "checkpoints" / "SoccerNet" / model_name / "checkpoint_best.pt",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c.resolve())
+
+    raise FileNotFoundError(
+        f"T-DEED checkpoint not found for model '{model_name}'. Searched: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+def run_action_spotting_tdeed(
+    *,
+    video_path: str,
+    out_dir: str,
+    run_id: str,
+    model_name: str,
+    threshold: float,
+    nms_window_sec: float,
+    frame_width: int,
+    frame_height: int,
+    checkpoint_path: Optional[str] = None,
+    tdeed_repo_dir: Optional[str] = None,
+    variant: str = "primary",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    tdeed_root = tdeed_repo_dir or _default_tdeed_repo_dir()
+    if not tdeed_root:
+        raise FileNotFoundError("T-DEED repository not found")
+
+    tdeed_dir = Path(str(tdeed_root)).resolve()
+    if not tdeed_dir.exists():
+        raise FileNotFoundError(str(tdeed_dir))
+
+    script_path = tdeed_dir / "inference.py"
+    if not script_path.exists():
+        raise FileNotFoundError(str(script_path))
+
+    model_name = str(model_name or "").strip()
+    if not model_name:
+        raise ValueError("T-DEED model_name is empty")
+
+    config_path = tdeed_dir / "config" / model_name.split("_")[0] / f"{model_name}.json"
+    if not config_path.exists():
+        raise FileNotFoundError(str(config_path))
+
+    ckpt_path = _resolve_tdeed_checkpoint_path(
+        tdeed_dir=tdeed_dir,
+        model_name=model_name,
+        explicit_checkpoint_path=checkpoint_path,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_json_name = f"tdeed_{_normalize_model_name_token(model_name)}_{run_id}.json"
+    out_json_path = str((Path(out_dir) / out_json_name).resolve())
+
+    def _invoke_tdeed(width: int, height: int) -> Tuple[subprocess.CompletedProcess, float, List[str]]:
+        cmd: List[str] = [
+            sys.executable,
+            "-u",
+            str(script_path),
+            "--model",
+            model_name,
+            "--video_path",
+            str(Path(video_path).resolve()),
+            "--frame_width",
+            str(int(width)),
+            "--frame_height",
+            str(int(height)),
+            "--inference_threshold",
+            str(float(threshold)),
+            "--checkpoint_path",
+            str(ckpt_path),
+            "--output_dir",
+            str(Path(out_dir).resolve()),
+            "--output_filename",
+            out_json_name,
+        ]
+        started = time.perf_counter()
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        proc = subprocess.run(
+            cmd,
+            cwd=str(tdeed_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        elapsed = time.perf_counter() - started
+        return proc, elapsed, cmd
+
+    requested_w = max(64, int(frame_width))
+    requested_h = max(64, int(frame_height))
+    used_w, used_h = requested_w, requested_h
+    used_fallback_resolution = False
+
+    proc, elapsed_sec, cmd = _invoke_tdeed(requested_w, requested_h)
+    stdout_text = str(proc.stdout or "")
+    if proc.returncode != 0:
+        lowered = stdout_text.lower()
+        if "outofmemory" in lowered or "cuda out of memory" in lowered:
+            fallback_w = min(requested_w, 398)
+            fallback_h = min(requested_h, 224)
+            if fallback_w != requested_w or fallback_h != requested_h:
+                used_w, used_h = fallback_w, fallback_h
+                used_fallback_resolution = True
+                proc, elapsed_sec, cmd = _invoke_tdeed(used_w, used_h)
+                stdout_text = str(proc.stdout or "")
+
+    if proc.returncode != 0:
+        tail = "\n".join(stdout_text.splitlines()[-40:])
+        raise RuntimeError(f"T-DEED inference failed for {model_name}:\n{tail}")
+
+    if not os.path.isfile(out_json_path):
+        raise FileNotFoundError(out_json_path)
+
+    with open(out_json_path, "r", encoding="utf-8") as f:
+        pred_payload = json.load(f)
+
+    predictions = pred_payload.get("predictions") if isinstance(pred_payload, dict) else []
+    predictions = predictions if isinstance(predictions, list) else []
+
+    cap = cv2.VideoCapture(str(Path(video_path).resolve()))
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    cap.release()
+    if fps <= 1e-6:
+        fps = 25.0
+
+    dataset_name = model_name.split("_")[0]
+    out_events: List[Dict[str, Any]] = []
+    labels_found: List[str] = []
+    for p in predictions:
+        try:
+            frame = int(float(p.get("frame", 0)))
+            raw_label = str(p.get("label", "")).strip()
+            score = float(p.get("confidence", 0.0))
+        except Exception:
+            continue
+        if not raw_label:
+            continue
+        norm_label = _normalize_tdeed_label(raw_label)
+        t = max(0.0, float(frame) / float(fps))
+        out_events.append(
+            {
+                "type": "soccer_event",
+                "source": "action_spotting",
+                "label": norm_label,
+                **({"raw_label": raw_label} if raw_label != norm_label else {}),
+                "t": t,
+                "timecode": _timecode(t),
+                "confidence": score,
+                "description_tr": _event_desc_tr(norm_label),
+                "spotting_model": model_name,
+                "spotting_variant": str(variant),
+                "spotting_dataset": dataset_name,
+            }
+        )
+        labels_found.append(norm_label)
+
+    meta: Dict[str, Any] = {
+        "model_name": model_name,
+        "variant": variant,
+        "dataset": dataset_name,
+        "config_path": str(config_path),
+        "checkpoint_path": str(ckpt_path),
+        "threshold": float(threshold),
+        "nms_window_sec": float(nms_window_sec),
+        "frame_width": used_w,
+        "frame_height": used_h,
+        "used_fallback_resolution": used_fallback_resolution,
+        "output_json_path": out_json_path,
+        "prediction_count": len(predictions),
+        "labels": sorted(set(labels_found)),
+        "inference_seconds": round(elapsed_sec, 3),
+        "command": cmd,
+    }
+
+    return out_events, meta
 
 def run_action_spotting_spotting_v2(
     *,
@@ -3279,7 +3424,6 @@ def run_action_spotting_spotting_v2(
     preds = spotting_inference.predict(model, features_path, threshold=threshold)
     final_preds = spotting_inference.nms(preds, window_sec=nms_window_sec)
 
-    # normalize output
     out: List[Dict[str, Any]] = []
     for p in final_preds:
         t = float(p.get("time", 0.0))
@@ -3298,7 +3442,6 @@ def run_action_spotting_spotting_v2(
         )
     return out
 
-
 def _parse_tracks_csv(csv_path: str) -> Dict[int, List[Dict[str, Any]]]:
     by_frame: Dict[int, List[Dict[str, Any]]] = {}
     with open(csv_path, "r", encoding="utf-8") as f:
@@ -3311,14 +3454,12 @@ def _parse_tracks_csv(csv_path: str) -> Dict[int, List[Dict[str, Any]]]:
             by_frame.setdefault(frame_id, []).append(row)
     return by_frame
 
-
 def _xyxy_center(row: Dict[str, Any]) -> Tuple[float, float]:
     x1 = float(row["x1"])
     y1 = float(row["y1"])
     x2 = float(row["x2"])
     y2 = float(row["y2"])
     return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-
 
 def derive_possession_events_from_tracks(
     *,
@@ -3331,7 +3472,6 @@ def derive_possession_events_from_tracks(
     by_frame = _parse_tracks_csv(tracks_csv_path)
     diag = float(np.sqrt(width * width + height * height)) + 1e-8
 
-    # iterate frames in order, with stride
     frame_ids = sorted(by_frame.keys())
     owners: List[Tuple[float, Optional[int]]] = []
 
@@ -3340,7 +3480,6 @@ def derive_possession_events_from_tracks(
     for fid in tqdm(ids, total=len(ids) if ids else None, desc="Possession", unit="frame"):
         rows = by_frame.get(fid, [])
 
-        # select ball
         ball_rows = [r for r in rows if int(float(r.get("cls_id", -1))) == int(cfg.ball_cls_id)]
         if not ball_rows:
             owners.append((fid / fps, None))
@@ -3349,7 +3488,6 @@ def derive_possession_events_from_tracks(
         ball_row = max(ball_rows, key=lambda r: float(r.get("conf", 0.0)))
         bx, by = _xyxy_center(ball_row)
 
-        # players
         player_rows = [r for r in rows if int(float(r.get("cls_id", -1))) == int(cfg.player_cls_id)]
         best_id: Optional[int] = None
         best_dist = 1e9
@@ -3368,7 +3506,6 @@ def derive_possession_events_from_tracks(
         else:
             owners.append((fid / fps, None))
 
-    # stable segments -> events
     stable_n = max(1, int(cfg.possession_stable_frames))
     window: List[Optional[int]] = []
     cur_stable: Optional[int] = None
@@ -3411,13 +3548,11 @@ def derive_possession_events_from_tracks(
             stable_owner = window[0]
             if stable_owner != cur_stable:
                 cur_stable = stable_owner
-                # emit immediately on stable confirmation
                 if cur_stable != prev_emitted:
                     emit(t, cur_stable, prev_emitted)
                     prev_emitted = cur_stable
 
     return events
-
 
 def overlay_events_on_video(
     *,
@@ -3447,7 +3582,6 @@ def overlay_events_on_video(
         cap.release()
         raise RuntimeError(f"Failed to open writer: {tmp_path}")
 
-    # build event display intervals
     intervals: List[Tuple[float, float, str]] = []
     for e in events:
         try:
@@ -3462,7 +3596,6 @@ def overlay_events_on_video(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     frame_idx = 0
     pbar = tqdm(total=total_frames if total_frames > 0 else None, desc="Overlay", unit="frame")
-    # If we have tracking CSV, stream it alongside video frames (memory-light).
     csv_f = None
     csv_reader = None
     next_row: Optional[Dict[str, Any]] = None
@@ -3492,9 +3625,7 @@ def overlay_events_on_video(
             cv2.putText(draw, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1)
             y += 30
 
-        # Draw tracking boxes + labels (ID + jersey number; no team label)
         if csv_reader is not None:
-            # advance csv to current frame
             rows: List[Dict[str, Any]] = []
             try:
                 while next_row is not None:
@@ -3529,7 +3660,6 @@ def overlay_events_on_video(
                 except Exception:
                     continue
 
-                # box
                 x1 = _clamp_int(x1, 0, draw.shape[1] - 1)
                 x2 = _clamp_int(x2, 0, draw.shape[1] - 1)
                 y1 = _clamp_int(y1, 0, draw.shape[0] - 1)
@@ -3539,7 +3669,6 @@ def overlay_events_on_video(
 
                 cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                # label (ID + NO)
                 label = f"#{track_id}  {jersey}"
                 y_text = max(14, y1 - 6)
                 cv2.putText(draw, label, (x1, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
@@ -3569,7 +3698,6 @@ def overlay_events_on_video(
     except Exception:
         pass
 
-    # Ensure browser playback: re-encode to H.264 (yuv420p) and move moov atom to start.
     ffmpeg_bin = _ffmpeg_exe()
     if ffmpeg_bin and os.path.isfile(tmp_path):
         try:
@@ -3598,10 +3726,8 @@ def overlay_events_on_video(
                 pass
             return out_path
         except Exception:
-            # If remux fails, fall back to the original file.
             pass
 
-    # Fallback: no ffmpeg available or remux failed.
     try:
         if os.path.isfile(out_path):
             os.remove(out_path)
@@ -3610,10 +3736,8 @@ def overlay_events_on_video(
     try:
         os.replace(tmp_path, out_path)
     except Exception:
-        # last resort
         out_path = tmp_path
     return out_path
-
 
 def run_full_pipeline(
     *,
@@ -3656,6 +3780,15 @@ def run_full_pipeline(
             "manage_container": bool(getattr(cfg, "qwen_vl_manage_container", False)),
             "container_id": str(getattr(cfg, "qwen_vl_container_id", "") or ""),
             "stop_before_commentary": bool(getattr(cfg, "qwen_vl_stop_before_commentary", True)),
+        },
+        "action_spotting": {
+            "model_name": str(getattr(cfg, "action_model_name", "SoccerNet_big") or "SoccerNet_big"),
+            "frame_width": int(getattr(cfg, "action_frame_width", 398) or 398),
+            "frame_height": int(getattr(cfg, "action_frame_height", 224) or 224),
+            "threshold": float(getattr(cfg, "action_threshold", 0.50)),
+            "run_ball": bool(getattr(cfg, "run_ball_action_spotting", True)),
+            "ball_model_name": str(getattr(cfg, "ball_model_name", "SoccerNetBall_challenge2") or "SoccerNetBall_challenge2"),
+            "ball_threshold": float(getattr(cfg, "ball_action_threshold", 0.20)),
         },
     }
 
@@ -3720,7 +3853,6 @@ def run_full_pipeline(
                 except Exception:
                     calibration_frames, calibration_frame_times = [], []
 
-            # Import calibration events into the unified manifest event list.
             if calibration_events_json_path and os.path.isfile(calibration_events_json_path):
                 try:
                     with open(calibration_events_json_path, "r", encoding="utf-8") as f:
@@ -3733,7 +3865,6 @@ def run_full_pipeline(
                 except Exception:
                     pass
 
-            # Make map video browser-playable (H.264 + faststart) when possible.
             try:
                 ffmpeg_bin = _ffmpeg_exe()
                 if ffmpeg_bin and calibration_map_video_path and os.path.isfile(calibration_map_video_path):
@@ -3765,7 +3896,6 @@ def run_full_pipeline(
             except Exception:
                 pass
         except Exception:
-            # Best-effort; keep pipeline running.
             calibration_map_video_path = None
             calibration_events_json_path = None
             calibration_frames_jsonl_path = None
@@ -3812,7 +3942,6 @@ def run_full_pipeline(
     jersey_by_track: Dict[int, Dict[str, Any]] = {}
     track_id_remap: Dict[int, int] = {}
 
-    # Derive possession events from tracking CSV (if available)
     if tracks_csv_path and os.path.isfile(tracks_csv_path):
         cap = cv2.VideoCapture(segment_path)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
@@ -3830,10 +3959,8 @@ def run_full_pipeline(
                 )
             )
         except Exception:
-            # possession is best-effort
             pass
 
-        # Jersey results may already be produced during tracking.
         if isinstance(tracking_res, dict):
             try:
                 jersey_by_track = tracking_res.get("jersey_by_track") or {}
@@ -3842,7 +3969,6 @@ def run_full_pipeline(
                 jersey_by_track = {}
                 track_id_remap = {}
 
-        # If not produced during tracking (or tracking was skipped), run jersey inference here.
         if bool(cfg.run_jersey_number_recognition) and (not jersey_by_track) and tracks_csv_path and os.path.isfile(tracks_csv_path):
             emit("jersey", 0, 1, "Forma numarası okunuyor")
             stage_start = time.perf_counter()
@@ -3864,43 +3990,56 @@ def run_full_pipeline(
             except Exception:
                 track_id_remap = {}
 
-    # Action spotting events
+    action_spotting_metadata: Dict[str, Any] = {}
+    action_spotting_metadata_path: Optional[str] = None
     if cfg.run_action_spotting:
-        emit("action_spotting", 0, 1, "Action spotting başlıyor")
+        emit("action_spotting", 0, 1, "Action spotting başlıyor (T-DEED)")
         stage_start = time.perf_counter()
-        if not cfg.features_path:
-            # Auto-extract PCA512 features (SoccerNet sn-spotting style) when not provided.
-            # This produces a single .npy with shape (T, 512) at ~2 FPS.
-            try:
-                from pcaextractor import extract_resnet_tf2_pca512  # type: ignore
-            except Exception as e:
-                raise RuntimeError(f"Failed to import pcaextractor: {e}")
-
-            auto_feat_path = str(Path(out_dir) / f"features_{run_id}_ResNET_TF2_PCA512.npy")
-            cfg.features_path = extract_resnet_tf2_pca512(
-                video_path=segment_path,
-                out_features_npy=auto_feat_path,
-                fps=2.0,
-                transform="crop",
-                overwrite=False,
-                progress_cb=progress_cb,
-            )
-        emit("action_spotting", 0, 1, "Model inference çalışıyor")
-        events.extend(
-            run_action_spotting_spotting_v2(
-                features_path=cfg.features_path,
-                checkpoint_path=cfg.checkpoint_path,
-                threshold=float(cfg.action_threshold),
-                nms_window_sec=float(cfg.action_nms_window_sec),
-            )
+        emit("action_spotting", 0, 1, "T-DEED SoccerNet inference çalışıyor")
+        primary_events, primary_meta = run_action_spotting_tdeed(
+            video_path=segment_path,
+            out_dir=out_dir,
+            run_id=run_id,
+            model_name=str(getattr(cfg, "action_model_name", "SoccerNet_big") or "SoccerNet_big"),
+            threshold=float(getattr(cfg, "action_threshold", 0.50)),
+            nms_window_sec=float(getattr(cfg, "action_nms_window_sec", 10.0)),
+            frame_width=int(getattr(cfg, "action_frame_width", 398) or 398),
+            frame_height=int(getattr(cfg, "action_frame_height", 224) or 224),
+            checkpoint_path=getattr(cfg, "checkpoint_path", None),
+            tdeed_repo_dir=getattr(cfg, "tdeed_repo_dir", None),
+            variant="primary",
         )
+        events.extend(primary_events)
+        action_spotting_metadata["primary"] = primary_meta
+
+        if bool(getattr(cfg, "run_ball_action_spotting", True)):
+            emit("action_spotting", 0, 1, "T-DEED SoccerNetBall inference çalışıyor")
+            ball_events, ball_meta = run_action_spotting_tdeed(
+                video_path=segment_path,
+                out_dir=out_dir,
+                run_id=run_id,
+                model_name=str(getattr(cfg, "ball_model_name", "SoccerNetBall_challenge2") or "SoccerNetBall_challenge2"),
+                threshold=float(getattr(cfg, "ball_action_threshold", 0.20)),
+                nms_window_sec=float(getattr(cfg, "action_nms_window_sec", 10.0)),
+                frame_width=int(getattr(cfg, "action_frame_width", 398) or 398),
+                frame_height=int(getattr(cfg, "action_frame_height", 224) or 224),
+                checkpoint_path=getattr(cfg, "ball_checkpoint_path", None),
+                tdeed_repo_dir=getattr(cfg, "tdeed_repo_dir", None),
+                variant="ball",
+            )
+            events.extend(ball_events)
+            action_spotting_metadata["ball"] = ball_meta
+
+        if action_spotting_metadata:
+            action_spotting_metadata_path = str(Path(out_dir) / f"action_spotting_meta_{run_id}.json")
+            with open(action_spotting_metadata_path, "w", encoding="utf-8") as _mf:
+                json.dump(action_spotting_metadata, _mf, ensure_ascii=False, indent=2)
+
         stage_timings_sec["action_spotting"] = round(time.perf_counter() - stage_start, 3)
         emit("action_spotting", 1, 1, "Action spotting tamam")
 
-    # Sort events by time
     events.sort(key=lambda e: float(e.get("t", 0.0)))
 
-    # Apply track-id remap to tracking-derived event fields.
     if track_id_remap:
         for e in events:
             for k in ("player_track_id", "from_player_track_id"):
@@ -3912,7 +4051,6 @@ def run_full_pipeline(
                 except Exception:
                     continue
 
-    # Attach jersey numbers to tracking-derived events (if available)
     if jersey_by_track:
         for e in events:
             try:
@@ -3929,23 +4067,18 @@ def run_full_pipeline(
             except Exception:
                 continue
 
-    # Commentary artifacts (filled after overlay generation)
     commentary_input_path: Optional[str] = None
     commentary_output_path: Optional[str] = None
     commentary_audio_manifest_path: Optional[str] = None
     commentary_video_path: Optional[str] = None
     commentary_gpu_cleanup: Optional[Dict[str, Any]] = None
     commentary_error: Optional[str] = None
-    # Product output: should be a clean (no boxes) video, optionally with commentary audio.
     product_video_path: str = segment_path
 
-    # The user-facing overlay should focus on action spotting events.
     overlay_events = [e for e in events if str(e.get("source")) == "action_spotting"]
     if not overlay_events:
         overlay_events = events
 
-    # For a clean overlay (no team labels baked into tracker video), draw boxes from CSV
-    # on top of the original segment.
     base_video = segment_path
     final_overlay_path = str(Path(out_dir) / f"overlay_{run_id}.mp4")
     emit("overlay", 0, 1, "Overlay başlıyor")
@@ -3963,7 +4096,6 @@ def run_full_pipeline(
     stage_timings_sec["overlay"] = round(time.perf_counter() - stage_start, 3)
     emit("overlay", 1, 1, "Overlay tamam")
 
-    # Commentary: ask Qwen for commentator lines, then optionally TTS+mix onto the clean segment.
     try:
         if bool(getattr(cfg, "run_commentary", True)):
             stage_start = time.perf_counter()
@@ -4015,38 +4147,82 @@ def run_full_pipeline(
                         indent=2,
                     )
 
-                llm_backend = str(getattr(cfg, "commentary_llm_backend", "ollama") or "ollama").strip()
-                llm_url = str(getattr(cfg, "commentary_llm_url", "http://localhost:11434/") or "http://localhost:11434/").strip()
-                llm_model = str(getattr(cfg, "commentary_llm_model", "qwen3.5:9b") or "qwen3.5:9b").strip()
+                llm_backend = str(getattr(cfg, "commentary_llm_backend", "vllm") or "vllm").strip()
+                llm_url = str(getattr(cfg, "commentary_llm_url", "http://localhost:8001/") or "http://localhost:8001/").strip()
+                llm_model = str(getattr(cfg, "commentary_llm_model", "nvidia/Qwen3-8B-NVFP4") or "nvidia/Qwen3-8B-NVFP4").strip()
+                llm_batch_size = int(getattr(cfg, "commentary_vllm_batch_size", 4) or 4)
+                llm_enable_thinking = bool(getattr(cfg, "commentary_vllm_enable_thinking", False))
                 items_out: List[Dict[str, Any]] = []
                 item_errors: List[str] = []
                 recent_texts: List[str] = []
                 timeout_sec = float(getattr(cfg, "commentary_llm_timeout_sec", 90.0) or 90.0)
                 total_items = max(1, len(items_in))
-                for idx, it in enumerate(items_in, start=1):
-                    emit("commentary_llm", idx - 1, total_items, f"Yorum üretiliyor ({idx}/{total_items})")
-                    prompt = _build_commentary_item_prompt(it, recent_texts)
-                    raw, err = _request_commentary_text(
+
+                use_batch = _normalize_commentary_backend(llm_backend) == "vllm" and llm_batch_size > 1
+
+                if use_batch:
+                    all_prompts: List[str] = []
+                    _recent_tmp: List[str] = []
+                    for it in items_in:
+                        all_prompts.append(_build_commentary_item_prompt(it, _recent_tmp))
+                        _recent_tmp.append("")  # placeholder; will be filled after batch
+
+                    emit("commentary_llm", 0, total_items, f"Batch yorum üretiliyor (batch_size={llm_batch_size})")
+                    batch_results = _request_commentary_batch(
+                        prompts=all_prompts,
                         base_url=llm_url,
                         model=llm_model,
-                        prompt=prompt,
                         backend=llm_backend,
                         timeout_sec=timeout_sec,
+                        enable_thinking=llm_enable_thinking,
+                        batch_size=llm_batch_size,
+                            emit_cb=emit,
+                            timecodes=[str(it.get("timecode") or "") for it in items_in],
                     )
-                    txt = _extract_commentary_text_best_effort(str(raw or "")) if raw else None
-                    final_text = _sanitize_commentary_text(str(txt or ""), it, recent_texts)
-                    if err:
-                        item_errors.append(f"{it.get('timecode')}: {err}")
-                    recent_texts.append(final_text)
-                    items_out.append(
-                        {
-                            **it,
-                            "text": final_text,
-                            "commentary_text": final_text,
-                            "llm_raw": str(raw or "")[:1000],
-                            "llm_item_error": err,
-                        }
-                    )
+                    for idx, (it, (raw, err)) in enumerate(zip(items_in, batch_results), start=1):
+                        emit("commentary_llm", idx, total_items, f"Yorum işleniyor ({idx}/{total_items})")
+                        txt = _extract_commentary_text_best_effort(str(raw or "")) if raw else None
+                        final_text = _sanitize_commentary_text(str(txt or ""), it, recent_texts)
+                        if err:
+                            item_errors.append(f"{it.get('timecode')}: {err}")
+                        recent_texts.append(final_text)
+                        items_out.append(
+                            {
+                                **it,
+                                "text": final_text,
+                                "commentary_text": final_text,
+                                "llm_raw": str(raw or "")[:1000],
+                                "llm_item_error": err,
+                            }
+                        )
+                else:
+                    for idx, it in enumerate(items_in, start=1):
+                        emit("commentary_llm", idx - 1, total_items, f"Yorum üretiliyor ({idx}/{total_items})")
+                        prompt = _build_commentary_item_prompt(it, recent_texts)
+                        raw, err = _request_commentary_text(
+                            base_url=llm_url,
+                            model=llm_model,
+                            prompt=prompt,
+                            backend=llm_backend,
+                            timeout_sec=timeout_sec,
+                            enable_thinking=llm_enable_thinking,
+                            timecode=str(it.get("timecode") or ""),
+                            emit_cb=emit,
+                        )
+                        txt = _extract_commentary_text_best_effort(str(raw or "")) if raw else None
+                        final_text = _sanitize_commentary_text(str(txt or ""), it, recent_texts)
+                        if err:
+                            item_errors.append(f"{it.get('timecode')}: {err}")
+                        recent_texts.append(final_text)
+                        items_out.append(
+                            {
+                                **it,
+                                "text": final_text,
+                                "commentary_text": final_text,
+                                "llm_raw": str(raw or "")[:1000],
+                                "llm_item_error": err,
+                            }
+                        )
                 emit("commentary_llm", total_items, total_items, "Yorumlar hazır")
 
                 err = "; ".join(item_errors[:10]) if item_errors else None
@@ -4192,7 +4368,9 @@ def run_full_pipeline(
             **({"commentary_output_path": commentary_output_path} if commentary_output_path else {}),
             **({"commentary_audio_manifest_path": commentary_audio_manifest_path} if commentary_audio_manifest_path else {}),
             **({"commentary_video_path": commentary_video_path} if commentary_video_path else {}),
+            **({"action_spotting_metadata_path": action_spotting_metadata_path} if action_spotting_metadata_path else {}),
         },
+        **({"action_spotting": action_spotting_metadata} if action_spotting_metadata else {}),
         **({"commentary_error": commentary_error} if commentary_error else {}),
         **({"qwen_vl_container_events": qwen_vl_container_events} if qwen_vl_container_events else {}),
         **({"commentary_gpu_cleanup": commentary_gpu_cleanup} if commentary_gpu_cleanup else {}),
@@ -4227,6 +4405,7 @@ def run_full_pipeline(
         **({"commentary_error": commentary_error} if commentary_error else {}),
         **({"qwen_vl_container_events": qwen_vl_container_events} if qwen_vl_container_events else {}),
         **({"commentary_gpu_cleanup": commentary_gpu_cleanup} if commentary_gpu_cleanup else {}),
+        **({"action_spotting_metadata_path": action_spotting_metadata_path} if action_spotting_metadata_path else {}),
         "events_json_path": events_json_path,
         "event_count": len(events),
     }

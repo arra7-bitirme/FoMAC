@@ -1,0 +1,129 @@
+{
+    "predictions": [
+        {
+            "frame": 12,
+            "label": "Kick-off",
+            "confidence": 0.8291015625
+        },
+        {
+            "frame": 84,
+            "label": "Kick-off",
+            "confidence": 0.79638671875
+        },
+        {
+            "frame": 792,
+            "label": "Shots on target",
+            "confidence": 0.32843017578125
+        },
+        {
+            "frame": 852,
+            "label": "Foul",
+            "confidence": 0.6300048828125
+        },
+        {
+            "frame": 924,
+            "label": "Goal",
+            "confidence": 0.60791015625
+        },
+        {
+            "frame": 936,
+            "label": "Ball out of play",
+            "confidence": 0.322998046875
+        },
+        {
+            "frame": 1968,
+            "label": "Kick-off",
+            "confidence": 0.38323974609375
+        },
+        {
+            "frame": 2640,
+            "label": "Kick-off",
+            "confidence": 0.405059814453125
+        },
+        {
+            "frame": 3276,
+            "label": "Kick-off",
+            "confidence": 0.48150634765625
+        },
+        {
+            "frame": 3348,
+            "label": "Kick-off",
+            "confidence": 0.3596839904785156
+        },
+        {
+            "frame": 3396,
+            "label": "Foul",
+            "confidence": 0.40771484375
+        },
+        {
+            "frame": 3612,
+            "label": "Indirect free-kick",
+            "confidence": 0.37744140625
+        },
+        {
+            "frame": 3876,
+            "label": "Foul",
+            "confidence": 0.8125
+        },
+        {
+            "frame": 3948,
+            "label": "Foul",
+            "confidence": 0.345947265625
+        },
+        {
+            "frame": 4020,
+            "label": "Indirect free-kick",
+            "confidence": 0.35821533203125
+        },
+        {
+            "frame": 4140,
+            "label": "Indirect free-kick",
+            "confidence": 0.469970703125
+        },
+        {
+            "frame": 5208,
+            "label": "Ball out of play",
+            "confidence": 0.941650390625
+        },
+        {
+            "frame": 5628,
+            "label": "Throw-in",
+            "confidence": 0.430419921875
+        },
+        {
+            "frame": 5880,
+            "label": "Indirect free-kick",
+            "confidence": 0.4925537109375
+        },
+        {
+            "frame": 5916,
+            "label": "Ball out of play",
+            "confidence": 0.373046875
+        },
+        {
+            "frame": 6072,
+            "label": "Foul",
+            "confidence": 0.84765625
+        },
+        {
+            "frame": 6348,
+            "label": "Yellow card",
+            "confidence": 0.3778076171875
+        },
+        {
+            "frame": 6420,
+            "label": "Yellow card",
+            "confidence": 0.641845703125
+        },
+        {
+            "frame": 8436,
+            "label": "Direct free-kick",
+            "confidence": 0.830078125
+        },
+        {
+            "frame": 8496,
+            "label": "Foul",
+            "confidence": 0.5126953125
+        }
+    ]
+}
