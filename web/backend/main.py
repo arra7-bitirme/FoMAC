@@ -610,9 +610,12 @@ class RunFullPipelineRequest(BaseModel):
     jersey_merge_min_confidence: float = 0.60
     jersey_merge_max_overlap_frames: int = 5
 
+    # Optional roster/mapping JSON path (uploaded via /api/upload_mapping).
+    player_mapping_path: Optional[str] = None
+
     # commentary
     run_commentary: bool = True
-    commentary_max_events: int = 30
+    commentary_max_events: int = 2000000
     commentary_possession_max_age_sec: float = 8.0
     commentary_llm_backend: str = "vllm"
     commentary_llm_url: str = "http://localhost:8001/"
@@ -723,6 +726,7 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         possession_stride_frames=int(req.possession_stride_frames),
         ball_cls_id=int(req.ball_cls_id),
         player_cls_id=int(req.player_cls_id),
+        player_roster_json=_read_mapping_json(req.player_mapping_path),
     )
 
     try:
@@ -788,6 +792,11 @@ async def run_full_pipeline(req: RunFullPipelineRequest):
         **(
             {"action_spotting_metadata_url": f"http://localhost:8000/api/file?path={requests_quote(result['action_spotting_metadata_path'])}"}
             if result.get("action_spotting_metadata_path")
+            else {}
+        ),
+        **(
+            {"match_stats_url": f"http://localhost:8000/api/file?path={requests_quote(result['match_stats_path'])}"}
+            if result.get("match_stats_path")
             else {}
         ),
     }
@@ -915,6 +924,7 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 possession_stride_frames=int(req.possession_stride_frames),
                 ball_cls_id=int(req.ball_cls_id),
                 player_cls_id=int(req.player_cls_id),
+                player_roster_json=_read_mapping_json(req.player_mapping_path),
             )
 
             result = _run(video_path=requested_path, out_dir=UPLOADS_DIR, cfg=cfg, progress_cb=progress_cb)
@@ -974,6 +984,11 @@ async def run_full_pipeline_async(req: RunFullPipelineRequest):
                 **(
                     {"action_spotting_metadata_url": f"http://localhost:8000/api/file?path={requests_quote(result['action_spotting_metadata_path'])}"}
                     if result.get("action_spotting_metadata_path")
+                    else {}
+                ),
+                **(
+                    {"match_stats_url": f"http://localhost:8000/api/file?path={requests_quote(result['match_stats_path'])}"}
+                    if result.get("match_stats_path")
                     else {}
                 ),
             }
@@ -1092,6 +1107,62 @@ async def upload_video(file: UploadFile = File(...)):
         "name": out_name,
         "url": f"http://localhost:8000/api/video?path={requests_quote(out_path)}",
     }
+
+
+def _read_mapping_json(mapping_path: Optional[str]) -> Optional[str]:
+    """Read a mapping JSON file and return its content as a string, or None on failure."""
+    if not mapping_path:
+        return None
+    try:
+        abs_path = os.path.abspath(mapping_path)
+        # Only allow files inside UPLOADS_DIR for security.
+        uploads_abs = os.path.normcase(os.path.realpath(UPLOADS_DIR))
+        req_abs = os.path.normcase(os.path.realpath(abs_path))
+        if os.path.commonpath([req_abs, uploads_abs]) != uploads_abs:
+            return None
+        if not os.path.isfile(abs_path):
+            return None
+        with open(abs_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+@app.post("/api/upload_mapping")
+async def upload_mapping(file: UploadFile = File(...)):
+    """Upload a roster/mapping JSON file and return its server path for use in pipeline requests."""
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+    filename = (file.filename or "mapping.json").strip().replace("\\", "/")
+    base = os.path.basename(filename)
+    base_name, ext = os.path.splitext(base)
+    if ext.lower() != ".json":
+        raise HTTPException(status_code=400, detail="Only .json files are accepted for mapping uploads.")
+
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    rand_hex = f"{random.getrandbits(32):08x}"
+    safe_base = "".join([c for c in base_name if c.isalnum() or c in ("-", "_", ".")]).strip() or "mapping"
+    out_name = f"{safe_base}_{stamp}_{rand_hex}.json"
+    out_path = os.path.join(UPLOADS_DIR, out_name)
+
+    try:
+        content = await file.read()
+        # Validate that it's valid JSON before saving.
+        json.loads(content)
+        with open(out_path, "wb") as f:
+            f.write(content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Uploaded file is not valid JSON.")
+    except Exception as e:
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+    return {"path": out_path, "name": out_name}
+
 
 class VideoFile(BaseModel):
     path: str
@@ -1385,6 +1456,23 @@ async def list_uploaded_videos():
             kind = "product"
         elif lf.startswith("map_"):
             kind = "map"
+
+        # Derive run_id (everything after the first underscore, before extension)
+        # e.g. "overlay_20260421000059_59147.mp4" → run_id = "20260421000059_59147"
+        run_id_for_file: str | None = None
+        try:
+            stem = f.rsplit(".", 1)[0]
+            idx = stem.index("_")
+            run_id_for_file = stem[idx + 1:]
+        except (ValueError, IndexError):
+            run_id_for_file = None
+
+        match_stats_url: str | None = None
+        if run_id_for_file:
+            ms_path = os.path.join(UPLOADS_DIR, f"match_stats_{run_id_for_file}.json")
+            if os.path.isfile(ms_path):
+                match_stats_url = f"http://localhost:8000/api/file?path={requests_quote(ms_path)}"
+
         # attach video_id if found (pydantic model will ignore extras on response)
         files.append(
             {
@@ -1393,6 +1481,7 @@ async def list_uploaded_videos():
                 "url": url,
                 "kind": kind,
                 **({"video_id": video_id} if video_id is not None else {}),
+                **({"match_stats_url": match_stats_url} if match_stats_url else {}),
             }
         )
     return files

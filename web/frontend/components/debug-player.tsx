@@ -5,6 +5,7 @@ import { useAppStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Play, Pause, RotateCcw, X, Loader2, Server, Framer } from "lucide-react";
+import { MatchStatsPanel } from "@/components/match-stats-panel";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const BUFFER_SECONDS = 4; // Process first 4 seconds of video before starting playback
@@ -45,9 +46,9 @@ export function DebugPlayer() {
   const lastFrameSendTime = useRef(0);
   
   const {
-    debugUrl, mapUrl, selectVideo, isPlaying, setIsPlaying,
-    currentTime, setCurrentTime, addFrameData, 
-    frameData, setCurrentFrame, currentFrame, 
+    debugUrl, mapUrl, matchStatsUrl, selectVideo, isPlaying, setIsPlaying,
+    currentTime, setCurrentTime, addFrameData,
+    frameData, setCurrentFrame, currentFrame,
     isProcessingFrame, setIsProcessingFrame
   } = useAppStore();
   
@@ -265,36 +266,10 @@ export function DebugPlayer() {
             </div>
           </Card>
 
-        <Card className="mt-4">
-          <div className="p-4 border-b">
-            <h3 className="font-semibold text-lg">Frame Data</h3>
-            <p className="text-sm text-muted-foreground">Pre-processed model outputs</p>
-          </div>
-          <div className="p-4 overflow-auto max-h-72 debug-panel">
-            {currentFrameData ? (
-              <pre className="text-xs bg-muted p-4 rounded-lg overflow-auto font-mono">{JSON.stringify(currentFrameData, null, 2)}</pre>
-            ) : (
-              <div className="text-center text-muted-foreground py-8">
-                {backendStatus === 'online' ? "Play video to view frame data" : "No debug data available"}
-              </div>
-            )}
-          </div>
-          <div className="p-4 border-t text-sm text-muted-foreground space-y-2">
-            <div>Total frames processed: {frameData.length}</div>
-            <div>Current frame displayed: {currentFrame > 0 ? currentFrame.toFixed(3) : '0.000'}</div>
-            <div className="flex items-center gap-2">
-              <Server className={`h-4 w-4 ${backendStatus === 'online' ? 'text-green-500' : 'text-red-500'}`} />
-              <span>Backend:</span>
-              <span className={`capitalize font-medium ${backendStatus === 'online' ? 'text-green-500' : 'text-red-500'}`}> {backendStatus} </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Framer className="h-4 w-4 text-brand" />
-              <span>Processing FPS:</span>
-              <span className="font-medium text-primary">{backendFps.toFixed(2)}</span>
-            </div>
-            {videoRef.current && <div className="mt-1">Playback Rate: {videoRef.current.playbackRate.toFixed(2)}x</div>}
-          </div>
-        </Card>
+
+        {matchStatsUrl && (
+          <MatchStatsPanel matchStatsUrl={matchStatsUrl} currentTime={currentTime} />
+        )}
       </div>
     </div>
   );

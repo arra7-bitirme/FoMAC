@@ -16,6 +16,147 @@ THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
 
 
+def _ensure_trt_weights(weights_path: str, device: str, half: bool = True) -> str:
+    """Export YOLO .pt → TensorRT .engine on first run; subsequent runs load the cached .engine."""
+    p = Path(weights_path)
+    if p.suffix == ".engine" or not device.startswith("cuda"):
+        return weights_path
+    engine_path = p.with_suffix(".engine")
+    if engine_path.exists():
+        return str(engine_path)
+    try:
+        from ultralytics import YOLO as _YOLO
+        print(f"[TRT] Exporting {p.name} → TensorRT (half={half}) …", flush=True)
+        model = _YOLO(str(p))
+        model.export(format="engine", half=half, device=device, verbose=False)
+        if engine_path.exists():
+            print(f"[TRT] Export done → {engine_path.name}", flush=True)
+            return str(engine_path)
+    except Exception as _e:
+        print(f"[TRT] Export failed, falling back to .pt: {_e}", flush=True)
+    return weights_path
+
+
+class _HRNetTRTRunner:
+    """TRT 10.x inference wrapper — drop-in replacement for an HRNet nn.Module."""
+
+    def __init__(self, engine_path: str, device: Any) -> None:
+        import tensorrt as trt
+        import torch
+
+        logger = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(logger)
+        with open(engine_path, "rb") as f:
+            engine = runtime.deserialize_cuda_engine(f.read())
+        self._context = engine.create_execution_context()
+        self._device = device
+
+        _dtype_map: dict = {}
+        try:
+            _dtype_map = {
+                trt.DataType.FLOAT: torch.float32,
+                trt.DataType.HALF: torch.float16,
+                trt.DataType.INT32: torch.int32,
+            }
+        except AttributeError:
+            _dtype_map = {
+                trt.float32: torch.float32,
+                trt.float16: torch.float16,
+                trt.int32: torch.int32,
+            }
+
+        self._in_name: str = ""
+        self._in_buf: Any = None
+        self._out_name: str = ""
+        self._out_buf: Any = None
+
+        for i in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(i)
+            shape = tuple(engine.get_tensor_shape(name))
+            dtype = engine.get_tensor_dtype(name)
+            tdtype = _dtype_map.get(dtype, torch.float32)
+            buf = torch.zeros(*shape, dtype=tdtype, device=device)
+            if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self._in_name, self._in_buf = name, buf
+            else:
+                self._out_name, self._out_buf = name, buf
+
+    def __call__(self, x: Any) -> Any:
+        import torch
+        self._in_buf.copy_(x.to(dtype=self._in_buf.dtype))
+        self._context.set_tensor_address(self._in_name, self._in_buf.data_ptr())
+        self._context.set_tensor_address(self._out_name, self._out_buf.data_ptr())
+        stream = torch.cuda.current_stream(self._device)
+        self._context.execute_async_v3(stream_handle=stream.cuda_stream)
+        stream.synchronize()
+        return self._out_buf.float()
+
+    def eval(self) -> "_HRNetTRTRunner":
+        return self
+
+
+def _try_hrnet_trt(model: Any, weights_path: str, dev: Any,
+                   input_shape: tuple = (1, 3, 540, 960)) -> Any:
+    """ONNX-export HRNet then build a TRT 10.x FP16 engine. Returns _HRNetTRTRunner or None."""
+    import torch
+    if getattr(dev, "type", "") != "cuda":
+        return None
+    p = Path(weights_path)
+    onnx_path = p.with_suffix(".onnx")
+    engine_path = p.with_suffix(".trt.engine")
+
+    if not onnx_path.exists():
+        print(f"[TRT] {p.name} → ONNX export …", flush=True)
+        try:
+            dummy = torch.zeros(*input_shape, device=dev)
+            with torch.no_grad():
+                torch.onnx.export(
+                    model, dummy, str(onnx_path),
+                    opset_version=16,
+                    input_names=["input"],
+                    output_names=["output"],
+                )
+            print(f"[TRT] ONNX saved → {onnx_path.name}", flush=True)
+        except Exception as _e:
+            print(f"[TRT] ONNX export failed: {_e}", flush=True)
+            return None
+
+    if not engine_path.exists():
+        print(f"[TRT] Building FP16 engine from {onnx_path.name} …", flush=True)
+        try:
+            import tensorrt as trt
+            logger = trt.Logger(trt.Logger.WARNING)
+            builder = trt.Builder(logger)
+            network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            parser = trt.OnnxParser(network, logger)
+            config = builder.create_builder_config()
+            if builder.platform_has_fast_fp16:
+                config.set_flag(trt.BuilderFlag.FP16)
+            with open(str(onnx_path), "rb") as f:
+                if not parser.parse(f.read()):
+                    errs = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+                    print(f"[TRT] ONNX parse errors: {errs}", flush=True)
+                    return None
+            serialized = builder.build_serialized_network(network, config)
+            if serialized is None:
+                print("[TRT] Engine build returned None", flush=True)
+                return None
+            with open(str(engine_path), "wb") as f:
+                f.write(serialized)
+            print(f"[TRT] Engine built → {engine_path.name}", flush=True)
+        except Exception as _e:
+            print(f"[TRT] TRT engine build failed: {_e}", flush=True)
+            return None
+
+    try:
+        runner = _HRNetTRTRunner(str(engine_path), dev)
+        print(f"[TRT] HRNet TRT runner ready ({engine_path.name})", flush=True)
+        return runner
+    except Exception as _e:
+        print(f"[TRT] TRT runner init failed: {_e}", flush=True)
+        return None
+
+
 @dataclass
 class CalibrationOutputs:
     map_video_path: str
@@ -98,30 +239,85 @@ def _load_hrnet_models(*, device: str, kp_weights: str, line_weights: str):
 
 
 def _pitch_background(*, scale: int = 8, margin: int = 50) -> np.ndarray:
-    # Match demo.py geometry
-    pitch_length = 105
-    pitch_width = 68
-    img_width = int(pitch_length * scale + 2 * margin)
-    img_height = int(pitch_width * scale + 2 * margin)
+    """Draw a football pitch background using OpenCV.
 
+    Geometry matches utils_field.py (nbjw_calib) — all coordinates in metres,
+    SoccerPitch convention: origin at centre, x: -52.5..+52.5, y: -34..+34.
+    """
+    pitch_length = 105   # metres
+    pitch_width  = 68
+    img_width  = int(pitch_length * scale + 2 * margin)
+    img_height = int(pitch_width  * scale + 2 * margin)
+
+    # Dark-green grass
     bg = np.ones((img_height, img_width, 3), dtype=np.uint8) * 50
-    bg[:, :, 1] = 100
+    bg[:, :, 1] = 110
 
+    lc = (210, 210, 210)   # line colour (light grey in BGR)
+    lw = 2
+
+    def w2p(wx: float, wy: float) -> Tuple[int, int]:
+        """World metres → pixel (SoccerPitch centred convention)."""
+        px = int((wx + pitch_length / 2.0) * scale + margin)
+        py = int((wy + pitch_width  / 2.0) * scale + margin)
+        return px, py
+
+    # ── Boundary ──────────────────────────────────────────────────────────────
+    cv2.line(bg, w2p(-52.5, -34), w2p(-52.5,  34), lc, lw)  # left
+    cv2.line(bg, w2p( 52.5, -34), w2p( 52.5,  34), lc, lw)  # right
+    cv2.line(bg, w2p(-52.5, -34), w2p( 52.5, -34), lc, lw)  # top
+    cv2.line(bg, w2p(-52.5,  34), w2p( 52.5,  34), lc, lw)  # bottom
+
+    # ── Centre line ───────────────────────────────────────────────────────────
+    cv2.line(bg, w2p(0, -34), w2p(0, 34), lc, lw)
+
+    # ── Left penalty area (16.5 m deep, 40.3 m wide) ─────────────────────────
+    cv2.line(bg, w2p(-52.5, -20.15), w2p(-36.0, -20.15), lc, lw)
+    cv2.line(bg, w2p(-52.5,  20.15), w2p(-36.0,  20.15), lc, lw)
+    cv2.line(bg, w2p(-36.0, -20.15), w2p(-36.0,  20.15), lc, lw)
+
+    # ── Left goal area (5.5 m deep, 18.3 m wide) ─────────────────────────────
+    cv2.line(bg, w2p(-52.5, -9.15), w2p(-47.0, -9.15), lc, lw)
+    cv2.line(bg, w2p(-52.5,  9.15), w2p(-47.0,  9.15), lc, lw)
+    cv2.line(bg, w2p(-47.0, -9.15), w2p(-47.0,  9.15), lc, lw)
+
+    # ── Right penalty area ────────────────────────────────────────────────────
+    cv2.line(bg, w2p(52.5, -20.15), w2p(36.0, -20.15), lc, lw)
+    cv2.line(bg, w2p(52.5,  20.15), w2p(36.0,  20.15), lc, lw)
+    cv2.line(bg, w2p(36.0, -20.15), w2p(36.0,  20.15), lc, lw)
+
+    # ── Right goal area ───────────────────────────────────────────────────────
+    cv2.line(bg, w2p(52.5, -9.15), w2p(47.0, -9.15), lc, lw)
+    cv2.line(bg, w2p(52.5,  9.15), w2p(47.0,  9.15), lc, lw)
+    cv2.line(bg, w2p(47.0, -9.15), w2p(47.0,  9.15), lc, lw)
+
+    # ── Centre circle (r = 9.15 m) + spot ────────────────────────────────────
+    r_px = int(9.15 * scale)
+    cv2.circle(bg, w2p(0.0, 0.0), r_px, lc, lw)
+    cv2.circle(bg, w2p(0.0, 0.0), 3,    lc, -1)
+
+    # ── Left penalty spot (11 m from goal line = -41.5 from centre) ──────────
+    cv2.circle(bg, w2p(-41.5, 0.0), 3, lc, -1)
+    # Penalty arc: portion outside left penalty area (penalty box edge at x=-36)
+    # Distance from spot to box edge = 41.5-36 = 5.5 m; arc half-angle ≈ 53°
+    cv2.ellipse(bg, w2p(-41.5, 0.0), (r_px, r_px), 0, -53, 53, lc, lw)
+
+    # ── Right penalty spot (94 m from left = +41.5 from centre) ──────────────
+    cv2.circle(bg, w2p(41.5, 0.0), 3, lc, -1)
+    cv2.ellipse(bg, w2p(41.5, 0.0), (r_px, r_px), 0, 127, 233, lc, lw)
+
+    # ── Try SoccerPitch for extra accuracy (optional, non-fatal) ─────────────
     try:
         from sn_calibration_baseline.soccerpitch import SoccerPitch
-
         field = SoccerPitch()
 
-        def world_to_minimap(pt3d: np.ndarray) -> Tuple[int, int]:
-            mx = int((float(pt3d[0]) + pitch_length / 2) * scale + margin)
-            my = int((float(pt3d[1]) + pitch_width / 2) * scale + margin)
-            return mx, my
+        def _w2p_sp(pt3d: np.ndarray) -> Tuple[int, int]:
+            return w2p(float(pt3d[0]), float(pt3d[1]))
 
         for line in field.sample_field_points():
-            pts = [world_to_minimap(np.asarray(p)) for p in line]
-            cv2.polylines(bg, [np.array(pts, dtype=np.int32)], False, (255, 255, 255), 2)
+            pts = [_w2p_sp(np.asarray(p)) for p in line]
+            cv2.polylines(bg, [np.array(pts, dtype=np.int32)], False, (230, 230, 230), 1)
     except Exception:
-        # Best-effort: keep a plain pitch background.
         pass
 
     return bg
@@ -510,6 +706,7 @@ def run(
     yolo_frame_window: int = 8,
     yolo_selection_mode: str = "ball_priority",
     interpolation_mode: str = "linear",
+    detection_cache_path: Optional[str] = None,
 ) -> CalibrationOutputs:
     import torch
 
@@ -539,6 +736,21 @@ def run(
     from ultralytics import YOLO
 
     det = YOLO(detector_weights)
+
+    # Detection cache (optional — written here, read by tracking subprocess)
+    det_cache = None
+    if detection_cache_path:
+        try:
+            import sys as _sys
+            import os as _os
+            _cache_dir = _os.path.dirname(_os.path.abspath(__file__))
+            _backend = _os.path.join(_os.path.dirname(_os.path.dirname(_cache_dir)), "web", "backend")
+            if _backend not in _sys.path:
+                _sys.path.insert(0, _backend)
+            from detection_cache import DetectionCache, boxes_to_cache
+            det_cache = DetectionCache(detection_cache_path)
+        except Exception:
+            det_cache = None
 
     # Optional tracker/team classifier (best-effort)
     # Prefer boxmot ByteTrack if available; otherwise use Ultralytics built-in tracker via YOLO.track(persist=True).
@@ -759,6 +971,9 @@ def run(
                         )
                     except Exception:
                         selected_track_result = None
+                    if det_cache is not None:
+                        _r = selected_track_result[0] if selected_track_result else None
+                        det_cache.set(selected_frame_idx, boxes_to_cache(_r))
                 else:
                     try:
                         stats["yolo_probe_frames"] += 1
@@ -766,28 +981,33 @@ def run(
                         selected_detect_result = probe_results[0] if probe_results else None
                     except Exception:
                         selected_detect_result = None
+                    if det_cache is not None:
+                        det_cache.set(selected_frame_idx, boxes_to_cache(selected_detect_result))
             elif yolo_selection_mode == "fused_window":
                 selected_batch_idx = 0
                 selected_frame_idx, frame_bgr = frame_batch[0]
-                for _, candidate_frame_bgr in frame_batch:
+                for _fw_idx, candidate_frame_bgr in frame_batch:
                     try:
                         stats["yolo_probe_frames"] += 1
                         probe_results = det(candidate_frame_bgr, verbose=False, conf=float(conf_thres))
                         probe_result = probe_results[0] if probe_results else None
                     except Exception:
                         probe_result = None
+                    if det_cache is not None:
+                        det_cache.set(_fw_idx, boxes_to_cache(probe_result))
                     candidate_person_dets, candidate_ball_boxes = _parse_yolo_boxes(probe_result, conf_thres)
                     fused_window_detections.append((np.asarray(candidate_person_dets), list(candidate_ball_boxes)))
             else:
+                # ball_priority: run YOLO on ALL frames in window to populate cache,
+                # but select the first frame where a ball is detected (or last if none found).
+                selected_batch_idx = len(frame_batch) - 1
+                selected_frame_idx = frame_batch[-1][0]
+                frame_bgr = frame_batch[-1][1]
                 for batch_idx, (candidate_frame_idx, candidate_frame_bgr) in enumerate(frame_batch):
-                    selected_batch_idx = batch_idx
-                    selected_frame_idx = candidate_frame_idx
-                    frame_bgr = candidate_frame_bgr
-
                     if tracking_backend == "ultralytics_track":
                         try:
                             stats["yolo_probe_frames"] += 1
-                            selected_track_result = det.track(
+                            _track_res = det.track(
                                 candidate_frame_bgr,
                                 verbose=False,
                                 persist=True,
@@ -795,22 +1015,39 @@ def run(
                                 tracker="bytetrack.yaml",
                             )
                         except Exception:
-                            selected_track_result = None
+                            _track_res = None
 
-                        probe_result = selected_track_result[0] if selected_track_result else None
+                        probe_result = _track_res[0] if _track_res else None
+                        if det_cache is not None:
+                            det_cache.set(candidate_frame_idx, boxes_to_cache(probe_result))
                     else:
                         try:
                             stats["yolo_probe_frames"] += 1
                             probe_results = det(candidate_frame_bgr, verbose=False, conf=float(conf_thres))
-                            selected_detect_result = probe_results[0] if probe_results else None
+                            _detect_result = probe_results[0] if probe_results else None
                         except Exception:
-                            selected_detect_result = None
+                            _detect_result = None
 
-                        probe_result = selected_detect_result
+                        probe_result = _detect_result
+                        if det_cache is not None:
+                            det_cache.set(candidate_frame_idx, boxes_to_cache(probe_result))
 
                     _, candidate_ball_boxes = _parse_yolo_boxes(probe_result, conf_thres)
-                    if candidate_ball_boxes or batch_idx == (len(frame_batch) - 1):
-                        break
+                    if candidate_ball_boxes and selected_batch_idx == len(frame_batch) - 1:
+                        # First frame with a ball found — use it as selected
+                        selected_batch_idx = batch_idx
+                        selected_frame_idx = candidate_frame_idx
+                        frame_bgr = candidate_frame_bgr
+                        if tracking_backend == "ultralytics_track":
+                            selected_track_result = _track_res
+                        else:
+                            selected_detect_result = _detect_result
+                    elif batch_idx == len(frame_batch) - 1 and selected_batch_idx == len(frame_batch) - 1:
+                        # No ball found; store last frame result as fallback
+                        if tracking_backend == "ultralytics_track":
+                            selected_track_result = _track_res
+                        else:
+                            selected_detect_result = _detect_result
 
             t_sec = float(selected_frame_idx) / float(max(1e-6, fps))
 
@@ -1340,6 +1577,12 @@ def run(
             indent=2,
         )
 
+    if det_cache is not None:
+        try:
+            det_cache.flush()
+        except Exception:
+            pass
+
     return CalibrationOutputs(
         map_video_path=str(out_map_p.resolve()),
         events_json_path=str(out_events_p.resolve()),
@@ -1386,6 +1629,9 @@ def main() -> None:
     ap.add_argument("--kp_weights", type=str, default=str(THIS_DIR / "SV_kp.pth"), help="HRNet keypoints weights")
     ap.add_argument("--line_weights", type=str, default=str(THIS_DIR / "SV_lines.pth"), help="HRNet lines weights")
     ap.add_argument("--conf", type=float, default=0.30, help="detector confidence threshold")
+    ap.add_argument("--detection_cache", type=str, default="", help="path to detection cache JSON (optional)")
+    ap.add_argument("--torch_compile", action="store_true", default=False, help="enable torch.compile for HRNet models")
+    ap.add_argument("--torch_compile_mode", type=str, default="reduce-overhead", help="torch.compile mode")
     args = ap.parse_args()
 
     outs = run(
@@ -1403,6 +1649,7 @@ def main() -> None:
         yolo_frame_window=int(args.yolo_frame_window),
         yolo_selection_mode=str(args.yolo_selection_mode),
         interpolation_mode=str(args.interpolation_mode),
+        detection_cache_path=str(args.detection_cache) if str(args.detection_cache or "").strip() else None,
     )
 
     # Print a short machine-readable summary for the caller.

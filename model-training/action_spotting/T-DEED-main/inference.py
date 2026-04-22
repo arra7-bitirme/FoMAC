@@ -81,6 +81,14 @@ def update_args(args, config):
 
 
 def main(args):
+    # TF32 on Ampere+ GPUs: free speedup for FP32 matmuls/convolutions
+    try:
+        torch.backends.cudnn.conv.fp32_precision = 'tf32'
+        torch.backends.cuda.matmul.fp32_precision = 'tf32'
+    except AttributeError:
+        torch.set_float32_matmul_precision('high')
+        torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
     config_path = args.model.split('_')[0] + '/' + args.model + '.json'
     config = load_json(os.path.join('config', config_path))
@@ -91,7 +99,7 @@ def main(args):
     if args.pretrain != None:
         pretrain_classes = load_classes(os.path.join('data', args.pretrain['dataset'], 'class.txt'))
 
-                
+
     # Model
     model = TDEEDModel(args=args)
 
@@ -99,7 +107,7 @@ def main(args):
     if args.pretrain != None:
         n_classes = [len(classes)+1, len(pretrain_classes)+1]
         model._model.update_pred_head(n_classes)
-        model._num_classes = np.array(n_classes).sum() 
+        model._num_classes = np.array(n_classes).sum()
 
     print('START INFERENCE')
     checkpoint_path = args.checkpoint_path
@@ -107,7 +115,7 @@ def main(args):
         checkpoint_path = os.path.join(
             os.getcwd(), 'checkpoints', args.model.split('_')[0], args.model, 'checkpoint_best.pt'
         )
-    model.load(torch.load(checkpoint_path))
+    model.load(torch.load(checkpoint_path, weights_only=True))
 
     stride = STRIDE
     if args.dataset == 'soccernet':
@@ -120,10 +128,20 @@ def main(args):
         stride = stride, dataset = args.dataset, size = (args.frame_width, args.frame_height)
     )
 
+    # For short clips, spawning num_workers processes costs more than it saves.
+    # Use in-process loading when total frames are few (< 16 * clip_len).
+    try:
+        total_clips = max(1, len(inference_dataset))
+    except TypeError:
+        total_clips = max(1, getattr(inference_dataset, '_video_len', 0) // max(1, args.clip_len))
+    effective_workers = args.num_workers if total_clips >= 16 else 0
+
     inference_loader = DataLoader(
         inference_dataset, batch_size = args.batch_size,
-        shuffle = False, num_workers = args.num_workers,
-        pin_memory = True, drop_last = False)
+        shuffle = False, num_workers = effective_workers,
+        pin_memory = True, drop_last = False,
+        persistent_workers = effective_workers > 0,
+    )
 
     inference(
         model,

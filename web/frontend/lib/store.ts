@@ -8,6 +8,7 @@ interface AppState {
   normalUrl: string | null;
   debugUrl: string | null;
   mapUrl: string | null;
+  matchStatsUrl: string | null;
   videoPath: string | null;
   videoName: string | null;
   videoId: number | null;
@@ -19,7 +20,7 @@ interface AppState {
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
   setDebugMode: (enabled: boolean) => void;
-  selectVideo: (video: { normalUrl: string; debugUrl: string; mapUrl?: string | null; path: string; name: string; video_id?: number } | null) => void;
+  selectVideo: (video: { normalUrl: string; debugUrl: string; mapUrl?: string | null; matchStatsUrl?: string | null; path: string; name: string; video_id?: number } | null) => void;
   addFrameData: (data: any) => void;
   clearFrameData: () => void;
   setCurrentFrame: (frame: number) => void;
@@ -35,6 +36,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   normalUrl: null,
   debugUrl: null,
   mapUrl: null,
+  matchStatsUrl: null,
   videoPath: null,
   videoName: null,
   videoId: null,
@@ -67,30 +69,31 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   selectVideo: (video) => {
     if (video) {
-      const { normalUrl, debugUrl, mapUrl, path, name, video_id } = video as any;
-      set({ 
-        normalUrl, 
-        debugUrl, 
+      const { normalUrl, debugUrl, mapUrl, matchStatsUrl, path, name, video_id } = video as any;
+      set({
+        normalUrl,
+        debugUrl,
         mapUrl: mapUrl ?? null,
-        videoPath: path, 
-        videoName: name, 
+        matchStatsUrl: matchStatsUrl ?? null,
+        videoPath: path,
+        videoName: name,
         videoId: video_id ?? null,
-        frameData: [], 
-        currentFrame: 0, 
-        currentTime: 0 
+        frameData: [],
+        currentFrame: 0,
+        currentTime: 0
       });
     } else {
-      // Clear video related state
-      set({ 
-        normalUrl: null, 
-        debugUrl: null, 
+      set({
+        normalUrl: null,
+        debugUrl: null,
         mapUrl: null,
-        videoPath: null, 
-        videoName: null, 
+        matchStatsUrl: null,
+        videoPath: null,
+        videoName: null,
         videoId: null,
-        frameData: [], 
-        currentFrame: 0, 
-        currentTime: 0 
+        frameData: [],
+        currentFrame: 0,
+        currentTime: 0
       });
     }
   },

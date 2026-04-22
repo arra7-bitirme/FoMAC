@@ -46,7 +46,7 @@ reid:
 # - a TorchScript model file (recommended), OR
 # - a deep-person-reid torchreid checkpoint (requires torchreid installed).
 osnet:
-  enabled: true
+  enabled: false
   weights: "weights/osnet_x1_0_imagenet.pth"  # relative to this config.yaml (TorchScript recommended)
   model_name: "osnet_x1_0"
   batch_size: 128

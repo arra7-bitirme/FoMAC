@@ -5,7 +5,7 @@ import { useAppStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Loader2, Upload } from "lucide-react";
+import { Loader2, Upload, FileJson, X } from "lucide-react";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
@@ -38,6 +38,10 @@ export function VideoSelector() {
   const [busy, setBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mappingInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [mappingFile, setMappingFile] = useState<File | null>(null);
+  const [mappingInfo, setMappingInfo] = useState<{ teams: string; competition: string } | null>(null);
 
   const [processedVideos, setProcessedVideos] = useState<VideoFile[]>([]);
   const [listError, setListError] = useState<string | null>(null);
@@ -104,6 +108,34 @@ export function VideoSelector() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedFile]);
 
+  function handleMappingFile(f: File | null) {
+    if (!f) {
+      setMappingFile(null);
+      setMappingInfo(null);
+      return;
+    }
+    if (!f.name.toLowerCase().endsWith(".json")) {
+      setStatusMessage("Lütfen .json uzantılı bir kadro dosyası seçin.");
+      return;
+    }
+    setMappingFile(f);
+    // Parse match info for display
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        const info = data?.match_info;
+        if (info) {
+          setMappingInfo({ teams: String(info.teams || ""), competition: String(info.competition || "") });
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+    reader.readAsText(f);
+    setStatusMessage(null);
+  }
+
   async function uploadAndRunPipeline() {
     if (!selectedFile) {
       setStatusMessage("Lütfen bir video dosyası seçin.");
@@ -127,6 +159,19 @@ export function VideoSelector() {
       const uploadData = await uploadResp.json();
       const uploadedPath = uploadData.path as string;
 
+      // Upload mapping JSON if provided
+      let mappingPath: string | null = null;
+      if (mappingFile) {
+        setStatusMessage("Kadro dosyası yükleniyor...");
+        const mfd = new FormData();
+        mfd.append("file", mappingFile);
+        const mResp = await fetch(`${BACKEND_URL}/api/upload_mapping`, { method: "POST", body: mfd });
+        if (mResp.ok) {
+          const mData = await mResp.json();
+          mappingPath = mData.path as string;
+        }
+      }
+
       setStatusMessage("Pipeline çalışıyor (tracking + action spotting)...");
 
       const minVal = minutes.trim() === "" ? null : parseFloat(minutes);
@@ -138,6 +183,9 @@ export function VideoSelector() {
       };
       if (minVal !== null && !isNaN(minVal) && minVal > 0) {
         payload.minutes = minVal;
+      }
+      if (mappingPath) {
+        payload.player_mapping_path = mappingPath;
       }
 
       const runResp = await fetch(`${BACKEND_URL}/api/run_full_pipeline_async`, {
@@ -170,10 +218,12 @@ export function VideoSelector() {
               const productUrl = (data.result.product_video_url as string) || (data.result.commentary_video_url as string) || overlayUrl;
               const productPath = (data.result.product_video_path as string) || (data.result.commentary_video_path as string) || overlayPath;
               const mapUrl = (data.result.calibration_map_video_url as string) || null;
+              const matchStatsUrl = (data.result.match_stats_url as string) || null;
               selectVideo({
                 normalUrl: productUrl,
                 debugUrl: overlayUrl,
                 mapUrl,
+                matchStatsUrl,
                 path: productPath || overlayPath || uploadedPath,
                 name: (productPath || overlayPath || "video.mp4").split("/").pop() || "video.mp4",
               });
@@ -280,10 +330,12 @@ export function VideoSelector() {
                           }
                         }
 
+                        const matchStatsUrl = (v as any).match_stats_url as string | undefined || null;
                         selectVideo({
                           normalUrl: productUrl,
                           debugUrl: overlayUrl,
                           mapUrl,
+                          matchStatsUrl,
                           path: productPath,
                           name: (productPath || v.path).split("/").pop() || v.name,
                         });
@@ -396,7 +448,55 @@ export function VideoSelector() {
 
             <div className="text-xs text-muted-foreground">Yükleme sonrası video otomatik pipeline’a girer.</div>
           </div>
-
+          {/* Roster / mapping JSON input */}
+          <div className="flex flex-col gap-2">
+            <div className="text-sm font-medium">Kadro Dosyası (opsiyonel)</div>
+            <div
+              className="flex items-center gap-2 rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/40"
+              onClick={() => mappingInputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") mappingInputRef.current?.click(); }}
+            >
+              <FileJson className="h-4 w-4 shrink-0 text-muted-foreground" />
+              {mappingFile ? (
+                <div className="flex flex-1 items-center gap-2 min-w-0">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm truncate">{mappingFile.name}</div>
+                    {mappingInfo && (
+                      <div className="text-xs text-muted-foreground truncate">{mappingInfo.teams} · {mappingInfo.competition}</div>
+                    )}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 shrink-0"
+                    onClick={(e) => { e.stopPropagation(); setMappingFile(null); setMappingInfo(null); }}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ) : (
+                <span className="text-sm text-muted-foreground">Kadro JSON dosyası seç (örn. galjuv_mapping.json)</span>
+              )}
+            </div>
+            <input
+              ref={mappingInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0] || null;
+                handleMappingFile(f);
+                // reset input so same file can be re-selected
+                e.target.value = "";
+              }}
+            />
+            <div className="text-xs text-muted-foreground">
+              Oyuncu isim–forma numarası eşleştirmesi. Qwen VL tahminlerini doğrular.
+            </div>
+          </div>
           <div className="flex items-center gap-2">
             <div className="text-sm font-medium">Dakika (opsiyonel)</div>
             <Input

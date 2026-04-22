@@ -75,6 +75,26 @@ DEFAULT_REID = r"C:\Users\Admin\Desktop\sn-reid\sn-reid\log\model\model.pth.tar-
 DEFAULT_CONFIG = str((THIS_DIR / "config.yaml").resolve())
 
 
+def _ensure_trt_weights(weights_path: str, device: str, half: bool = True) -> str:
+    """Export a YOLO .pt model to TensorRT .engine on first run; subsequent runs load cached .engine."""
+    p = Path(weights_path)
+    if p.suffix == ".engine" or not device.startswith("cuda"):
+        return weights_path
+    engine_path = p.with_suffix(".engine")
+    if engine_path.exists():
+        return str(engine_path)
+    try:
+        print(f"[TRT] Exporting {p.name} → TensorRT (half={half}) …", flush=True)
+        model = YOLO(str(p))
+        model.export(format="engine", half=half, device=device, verbose=False)
+        if engine_path.exists():
+            print(f"[TRT] Export done → {engine_path.name}", flush=True)
+            return str(engine_path)
+    except Exception as _e:
+        print(f"[TRT] Export failed, falling back to .pt: {_e}", flush=True)
+    return weights_path
+
+
 # Special output track-id ranges (keeps numeric CSV schema, but stable/reserved IDs)
 SPECIAL_TRACK_ID_BASE_GOALKEEPER = 800_000_000
 SPECIAL_TRACK_ID_REFEREE = 900_000_001
@@ -268,6 +288,16 @@ def _parse_jersey_number_from_text(text: str) -> Optional[str]:
     if not text:
         return None
     t = str(text).strip()
+
+    # Handle JSON output: {"number": "7", "team": "A"}
+    try:
+        import json as _json
+        obj = _json.loads(t)
+        if isinstance(obj, dict):
+            t = str(obj.get("number") or "").strip()
+    except Exception:
+        pass
+
     if t == "-1":
         return "-1"
     t = t.split()[0] if t.split() else t
@@ -280,6 +310,39 @@ def _parse_jersey_number_from_text(text: str) -> Optional[str]:
     if 0 <= n <= 99:
         return str(n)
     return None
+
+
+def _parse_jersey_team_from_text(text: str) -> Optional[str]:
+    if not text:
+        return None
+    try:
+        import json as _json
+        obj = _json.loads(str(text).strip())
+        if isinstance(obj, dict):
+            team = str(obj.get("team") or "").strip().upper()
+            if team in ("A", "B"):
+                return team
+    except Exception:
+        pass
+    return None
+
+
+def _snap_jersey_to_roster(num_str: str, valid_nums: List[str]) -> str:
+    if not valid_nums or not num_str or num_str == "-1":
+        return num_str
+    try:
+        n = int(num_str)
+    except ValueError:
+        return num_str
+    valid_ints: List[int] = []
+    for v in valid_nums:
+        try:
+            valid_ints.append(int(v))
+        except ValueError:
+            pass
+    if not valid_ints:
+        return num_str
+    return str(min(valid_ints, key=lambda x: abs(x - n)))
 
 
 def _qwen_vl_openai_compatible(
@@ -404,6 +467,7 @@ def main() -> None:
     ap.add_argument("--cut_reset", type=int, default=None)
     ap.add_argument("--cut_mode", type=str, default=None)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--detection_cache", type=str, default="", help="path to global detection cache JSON (optional)")
 
     args = ap.parse_args()
 
@@ -450,7 +514,8 @@ def main() -> None:
         print("⚠️  CUDA requested but not available; falling back to cpu")
         device = "cpu"
 
-    detector = YOLO(str(det_path))
+    trt_det_path = _ensure_trt_weights(str(det_path), device=device, half=True)
+    detector = YOLO(trt_det_path)
     player_id, ball_id, referee_id = _infer_class_ids(detector)
     track_classes = (player_id, referee_id)
 
@@ -556,6 +621,26 @@ def main() -> None:
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     tracker.set_frame_size(w, h)
 
+    # Detection cache (populated by calibration subprocess; reduces redundant YOLO calls)
+    det_cache = None
+    _cache_hit_count = 0
+    _cache_miss_count = 0
+    _cache_write_count = 0
+    if str(args.detection_cache or "").strip():
+        try:
+            import sys as _sys
+            import os as _os
+            _this_dir = _os.path.dirname(_os.path.abspath(__file__))
+            _backend = _os.path.join(_os.path.dirname(_os.path.dirname(_this_dir)), "web", "backend")
+            if _backend not in _sys.path:
+                _sys.path.insert(0, _backend)
+            from detection_cache import DetectionCache, cached_to_dets_np
+            det_cache = DetectionCache(str(args.detection_cache).strip())
+            print(f"[cache] Loaded detection cache: {len(det_cache)} entries from {args.detection_cache}")
+        except Exception as _e:
+            print(f"[cache] Could not load detection cache: {_e}")
+            det_cache = None
+
     # Collect jersey samples from early part of the match
     CALIB_SAMPLES = 600
     samples = 0
@@ -614,10 +699,25 @@ def main() -> None:
 
     jersey_lock = threading.Lock()
     jersey_final: Dict[int, str] = {}
+    jersey_votes: Dict[int, Dict[str, int]] = {}
+    jersey_team_votes: Dict[int, Dict[str, int]] = {}
     jersey_attempts: Dict[int, int] = {}
     jersey_last_q: Dict[int, int] = {}
     jersey_raw: Dict[int, List[str]] = {}
     jersey_meta: Dict[int, Dict[str, Any]] = {}
+
+    # Parse roster team label map from jersey_prompt if encoded as JSON roster hint
+    # (pipeline passes enhanced prompt with "Team A (...): 1,7,..." lines)
+    _jersey_team_label_map: Dict[str, List[str]] = {}
+    try:
+        import re as _re
+        for _m in _re.finditer(r"Team ([A-B]) \([^)]+\): ([\d, ]+)", str(args.jersey_prompt)):
+            _letter = _m.group(1)
+            _nums = [x.strip() for x in _m.group(2).split(",") if x.strip().isdigit()]
+            if _nums:
+                _jersey_team_label_map[_letter] = _nums
+    except Exception:
+        pass
 
     jersey_q: "queue.Queue[Tuple[int, int, np.ndarray]]" = queue.Queue(maxsize=64)
     jersey_stop = threading.Event()
@@ -649,13 +749,20 @@ def main() -> None:
             if raw:
                 with jersey_lock:
                     jersey_raw.setdefault(int(tid), []).append(str(raw))
+                    team_lbl = _parse_jersey_team_from_text(str(raw))
+                    if team_lbl:
+                        tv = jersey_team_votes.setdefault(int(tid), {})
+                        tv[team_lbl] = tv.get(team_lbl, 0) + 1
 
             if jersey is not None:
                 js = str(jersey).strip()
                 if js != "-1":
                     with jersey_lock:
-                        if int(tid) not in jersey_final:
-                            jersey_final[int(tid)] = js
+                        votes = jersey_votes.setdefault(int(tid), {})
+                        votes[js] = votes.get(js, 0) + 1
+                        # Pick majority vote
+                        best = max(votes, key=lambda k: votes[k])
+                        jersey_final[int(tid)] = best
 
             try:
                 jersey_q.task_done()
@@ -825,12 +932,22 @@ def main() -> None:
                     tracker.enter_replay_mode(replay_frames, stricter=replay_stricter)  # tightens gates for N frames
         prev_frame = frame
 
-        results = detector.predict(source=frame, verbose=False, device=device)
-        boxes = results[0].boxes
-        if boxes is None or len(boxes) == 0:
-            dets_np = np.empty((0, 6), dtype=np.float32)
+        _cache_key = frame_id - 1  # cache uses 0-indexed frame ids
+        _cached = det_cache.get(_cache_key) if det_cache is not None else None
+        if _cached is not None:
+            dets_np = cached_to_dets_np(_cached)
+            _cache_hit_count += 1
         else:
-            dets_np = boxes.data.detach().cpu().numpy().astype(np.float32)
+            results = detector.predict(source=frame, verbose=False, device=device)
+            boxes = results[0].boxes
+            if boxes is None or len(boxes) == 0:
+                dets_np = np.empty((0, 6), dtype=np.float32)
+            else:
+                dets_np = boxes.data.detach().cpu().numpy().astype(np.float32)
+            if det_cache is not None:
+                det_cache.set(_cache_key, dets_np[:, :6].tolist())
+                _cache_write_count += 1
+            _cache_miss_count += 1
 
         dets: List[Detection] = []
         crops_for_reid: List[np.ndarray] = []
@@ -1133,6 +1250,18 @@ def main() -> None:
     if out_f is not None:
         out_f.close()
 
+    if det_cache is not None:
+        try:
+            det_cache.flush()
+            total_det = _cache_hit_count + _cache_miss_count
+            hit_pct = 100.0 * _cache_hit_count / max(1, total_det)
+            print(
+                f"[cache] hits={_cache_hit_count} misses={_cache_miss_count} "
+                f"written={_cache_write_count} hit_rate={hit_pct:.1f}%"
+            )
+        except Exception:
+            pass
+
     if jersey_enabled:
         try:
             jersey_stop.set()
@@ -1153,6 +1282,14 @@ def main() -> None:
                 with jersey_lock:
                     for tid, meta in jersey_meta.items():
                         jersey_num = str(jersey_final.get(int(tid), "-1"))
+                        # Team-aware roster snap
+                        if jersey_num != "-1" and _jersey_team_label_map:
+                            tv = jersey_team_votes.get(int(tid), {})
+                            if tv:
+                                best_team = max(tv, key=lambda k: tv[k])
+                                team_nums = _jersey_team_label_map.get(best_team, [])
+                                if team_nums:
+                                    jersey_num = _snap_jersey_to_roster(jersey_num, team_nums)
                         payload.append(
                             {
                                 **(meta or {}),
@@ -1166,6 +1303,10 @@ def main() -> None:
                 p.parent.mkdir(parents=True, exist_ok=True)
                 with open(p, "w", encoding="utf-8") as f:
                     json.dump(payload, f, ensure_ascii=False, indent=2)
+                try:
+                    print("__JERSEY_RESULT__ " + json.dumps(payload, ensure_ascii=False), flush=True)
+                except Exception:
+                    pass
         except Exception:
             pass
 
